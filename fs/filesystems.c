@@ -215,6 +215,8 @@ int get_filesystem_list(char * buf)
 	read_unlock(&file_systems_lock);
 	return len;
 }
+EXPORT_SYMBOL(get_filesystem_list);
+
 
 #ifdef CONFIG_PROC_FS
 static int filesystems_proc_show(struct seq_file *m, void *v)
