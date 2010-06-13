@@ -21,4 +21,6 @@ LIB_OBJS=$(patsubst $(srctree)/$(src)/lib/%.c,$(obj)/lib/%.o,$(LIB))
 lkl.a: $(patsubst %,$(obj)/%.o,$(ENV)) $(DRV_OBJS) $(LIB_OBJS)
 	$(CROSS_COMPILE)ar -rc $@ $^
 
+lkl.o: $(patsubst %,$(obj)/%.o,$(ENV)) $(DRV_OBJS) $(LIB_OBJS) vmlinux
+	$(CROSS_COMPILE)ld -r -o $@ $^
 

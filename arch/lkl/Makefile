@@ -37,6 +37,10 @@ lkl.a: vmlinux
 	$(OBJCOPY) -w -G_lkl* -Glkl* -Gget_filesystem_list vmlinux
 	$(AR) -q $@ $^
 
+lkl.o: vmlinux
+	$(MAKE) $(build)=$(arch_dir)/envs/ lkl.o
+	$(OBJCOPY) -w -G_lkl* -Glkl*  -Gget_filesystem_list -G_get_filesystem_list lkl.o
+
 
 
 
