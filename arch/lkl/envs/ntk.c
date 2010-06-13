@@ -232,13 +232,13 @@ err:
 	return status;
 }
 
-void lkl_wait_init(void)
+static void lkl_wait_init(void)
 {
 	KeWaitForSingleObject(init_thread_obj, Executive, KernelMode, FALSE, NULL);
 	ObDereferenceObject(init_thread_obj);
 }
 
-void lkl_wait_timer(void)
+static void lkl_wait_timer(void)
 {
 	KeWaitForSingleObject(timer_thread_obj, Executive, KernelMode, FALSE, NULL);
 	ObDereferenceObject(timer_thread_obj);
