@@ -114,13 +114,21 @@ int sscanf(const char *, const char *,
 	   ...) __attribute__ ((format (scanf, 2, 3)));
 
 
-#ifndef strchr
-extern char * strchr(const char *,int);
-#endif /* strchr */
+/* GCC implements strchr/strlen as preprocessor macros.
+ *
+ * If we're on GCC but don't see strchr/strlen preprocessor symbols,
+ * we add regular declarations for them.
+ */
+#if defined(__GNUC__)
+# ifndef stdchr
+  extern char * strchr(const char *, int);
+# endif /* strchr */
 
-#ifndef strlen
-extern __kernel_size_t strlen(const char *);
-#endif /* strlen */
+# ifndef strlen
+  extern __kernel_size_t strlen(const char *);
+# endif /* strlen */
+#endif
+
 
 /*
  * All subsequent system calls from the current native thread will be executed

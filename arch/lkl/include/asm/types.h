@@ -26,6 +26,11 @@ typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
 
+#if defined(_MSC_VER) && !defined(__STRICT_ANSI__)
+typedef __signed__ long long __s64;
+typedef unsigned long long __u64;
+#endif
+
 #endif /* __ASSEMBLY__ */
 
 /*

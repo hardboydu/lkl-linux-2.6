@@ -26,7 +26,11 @@ extern void __chk_io_ptr(const volatile void __iomem *);
 # define __iomem
 # define __chk_user_ptr(x) (void)0
 # define __chk_io_ptr(x) (void)0
-# define __builtin_warning(x, y...) (1)
+# ifdef _MSC_VER
+#  define __builtin_warning(x,  ...) (1)
+# else
+#  define __builtin_warning(x, y...) (1)
+# endif /* _MSC_VER */
 # define __acquires(x)
 # define __releases(x)
 # define __acquire(x) (void)0
@@ -51,6 +55,10 @@ extern void __chk_io_ptr(const volatile void __iomem *);
 
 #ifdef __MINGW32__ 
 # include <linux/compiler-mingw.h>
+#endif
+
+#ifdef _MSC_VER
+# include <linux/compiler-microsoft.h>
 #endif
 
 /*
