@@ -27,7 +27,7 @@ static void get_fs_names(char *page)
 	*s = '\0';
 }
 
-long lkl_mount(char *dev, char *mnt, int flags, void *data)
+LKLAPI long lkl_mount(char *dev, char *mnt, int flags, void *data)
 {
 	int err;
 	char *p, *fs_names=(char*)lkl_nops->mem_alloc(PAGE_SIZE);
@@ -61,8 +61,8 @@ out:
  *
  * The mount path will be returned in mnt_path.
  */
-long lkl_mount_dev(__kernel_dev_t devt, char *fs_type, int flags,
-		   void *data, char *mnt_str, int mnt_str_len)
+LKLAPI long lkl_mount_dev(__kernel_dev_t devt, char *fs_type, int flags,
+				void *data, char *mnt_str, int mnt_str_len)
 {
 	char dev_str[] = { "/dev/xxxxxxxxxxxxxxxx" };
 	int err;
@@ -104,7 +104,7 @@ long lkl_mount_dev(__kernel_dev_t devt, char *fs_type, int flags,
 	return 0;
 }
 
-long lkl_umount_dev(__kernel_dev_t dev, int flags)
+LKLAPI long lkl_umount_dev(__kernel_dev_t dev, int flags)
 {
 	char dev_str[] = { "/dev/xxxxxxxxxxxxxxxx" };
 	char mnt_str[] = { "/mnt/xxxxxxxxxxxxxxxx" };

@@ -1,6 +1,8 @@
 #ifndef _ASM_LKL_STATFS_H
 #define _ASM_LKL_STATFS_H
 
+#include <asm/types.h>
+
 #ifdef __KERNEL__
 #define __kernel_statfs statfs
 #define __kernel_statfs64 statfs64

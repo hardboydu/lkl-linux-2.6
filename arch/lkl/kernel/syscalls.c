@@ -1,4 +1,7 @@
 #include <linux/syscalls.h>
+#include <asm/stat.h>
+#include <linux/stat.h>
+#include <asm/lkl.h>
 #include <asm/unistd.h>
 #include <asm/callbacks.h>
 #include <linux/irq.h>
@@ -328,210 +331,211 @@ void init_syscall_table(void)
 	INIT_STE(lkl_pwrite64);
 }
 
-long lkl_sys_sync(void)
+LKLAPI long lkl_sys_sync(void)
 {
 	return SYSCALL(sync);
 }
 
-long lkl_sys_umount(const char *path, int flags)
+LKLAPI long lkl_sys_umount(const char *path, int flags)
 {
 	return SYSCALL(umount, (long)path, flags);
 }
 
-ssize_t lkl_sys_write(unsigned int fd, const char *buf, size_t count)
+LKLAPI ssize_t lkl_sys_write(unsigned int fd, const char *buf, size_t count)
 {
 	return SYSCALL(write, fd, (long)buf, count);
 }
 
-long lkl_sys_close(unsigned int fd)
+LKLAPI long lkl_sys_close(unsigned int fd)
 {
 	return SYSCALL(close, fd);
 }
 
-long lkl_sys_unlink(const char *pathname)
+LKLAPI long lkl_sys_unlink(const char *pathname)
 {
 	return SYSCALL(unlink, (long)pathname);
 }
 
-long lkl_sys_open(const char *filename, int flags, int mode)
+LKLAPI long lkl_sys_open(const char *filename, int flags, int mode)
 {
        return SYSCALL(open, (long)filename, flags, mode);
 }
 
-long lkl_sys_poll(struct pollfd *ufds, unsigned int nfds, long timeout)
+LKLAPI long lkl_sys_poll(struct pollfd *ufds, unsigned int nfds, long timeout)
 {
 	return SYSCALL(poll, (long)ufds, nfds, timeout);
 }
 
-ssize_t lkl_sys_read(unsigned int fd, char *buf, size_t count)
+LKLAPI ssize_t lkl_sys_read(unsigned int fd, char *buf, size_t count)
 {
 	return SYSCALL(read, fd, (long)buf, count);
 }
 
-off_t lkl_sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
+LKLAPI off_t lkl_sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 {
 	return SYSCALL(lseek, fd, offset, origin);
 }
 
-long lkl_sys_rename(const char *oldname, const char *newname)
+LKLAPI long lkl_sys_rename(const char *oldname, const char *newname)
 {
 	return SYSCALL(rename, (long)oldname, (long)newname);
 }
 
-long lkl_sys_flock(unsigned int fd, unsigned int cmd)
+LKLAPI long lkl_sys_flock(unsigned int fd, unsigned int cmd)
 {
 	return SYSCALL(flock, fd, cmd);
 }
 
-long lkl_sys_newfstat(unsigned int fd, struct stat *statbuf)
+LKLAPI long lkl_sys_newfstat(unsigned int fd, struct __kernel_stat *statbuf)
 {
 	return SYSCALL(newfstat, fd, (long)statbuf);
 }
 
-long lkl_sys_chmod(const char *filename, mode_t mode)
+LKLAPI long lkl_sys_chmod(const char *filename, mode_t mode)
 {
 	return SYSCALL(chmod, (long)filename, mode);
 }
 
-long lkl_sys_newlstat(char *filename, struct stat *statbuf)
+LKLAPI long lkl_sys_newlstat(char *filename, struct __kernel_stat *statbuf)
 {
 	return SYSCALL(newlstat, (long)filename, (long)statbuf);
 }
 
-long lkl_sys_mkdir(const char *pathname, int mode)
+LKLAPI long lkl_sys_mkdir(const char *pathname, int mode)
 {
 	return SYSCALL(mkdir, (long)pathname, mode);
 }
 
-long lkl_sys_rmdir(const char *pathname)
+LKLAPI long lkl_sys_rmdir(const char *pathname)
 {
 	return SYSCALL(rmdir, (long)pathname);
 }
 
-long lkl_sys_getdents(unsigned int fd, struct linux_dirent *dirent, unsigned int count)
+LKLAPI long lkl_sys_getdents(unsigned int fd, struct __kernel_dirent *dirent, unsigned int count)
 {
 	return SYSCALL(getdents, fd, (long)dirent, count);
 }
 
-long lkl_sys_newstat(char *filename, struct stat *statbuf)
+LKLAPI long lkl_sys_newstat(char *filename, struct __kernel_stat *statbuf)
 {
 	return SYSCALL(newstat, (long)filename, (long)statbuf);
 }
 
-long lkl_sys_utimes(const char *filename, struct timeval *utimes)
+LKLAPI long lkl_sys_utimes(const char *filename, struct __kernel_timeval *utimes)
 {
 	return SYSCALL(utime, (long)filename, (long)utimes);
 }
 
-long lkl_sys_mount(const char *dev, const char *mnt_point, const char *fs, int flags, void *data)
+LKLAPI long lkl_sys_mount(const char *dev, const char *mnt_point,
+				const char *fs, unsigned long flags, void *data)
 {
 	return SYSCALL(safe_mount, (long)dev, (long)mnt_point, (long)fs, flags, (long)data);
 }
 
 
-long lkl_sys_chdir(const char *dir)
+LKLAPI long lkl_sys_chdir(const char *dir)
 {
 	return SYSCALL(chdir, (long)dir);
 }
 
 
-long lkl_sys_mknod(const char *filename, int mode, unsigned dev)
+LKLAPI long lkl_sys_mknod(const char *filename, int mode, unsigned dev)
 {
 	return SYSCALL(mknod, (long)filename, mode, dev);
 }
 
 
-long lkl_sys_chroot(const char *dir)
+LKLAPI long lkl_sys_chroot(const char *dir)
 {
 	return SYSCALL(chroot, (long)dir);
 }
 
-long lkl_sys_nanosleep(struct timespec *rqtp, struct timespec *rmtp)
+LKLAPI long lkl_sys_nanosleep(struct __kernel_timespec *rqtp, struct __kernel_timespec *rmtp)
 {
 	return SYSCALL(nanosleep, (long)rqtp, (long)rmtp);
 }
 
-long lkl_sys_getcwd(char *buf, unsigned long size)
+LKLAPI long lkl_sys_getcwd(char *buf, unsigned long size)
 {
 	return SYSCALL(getcwd, (long)buf, (long) size);
 }
 
-long lkl_sys_utime(const char *filename, const struct utimbuf *buf)
+LKLAPI long lkl_sys_utime(const char *filename, const struct __kernel_utimbuf *buf)
 {
         return SYSCALL(utime, (long)filename, (long)buf);
 }
 
-long lkl_sys_socket(int family, int type, int protocol)
+LKLAPI long lkl_sys_socket(int family, int type, int protocol)
 {
 	long args[6]={family, type, protocol};
 	return SYSCALL(socketcall, SYS_SOCKET, (long)args);
 }
 
-long lkl_sys_send(int sock, void *buffer, size_t size, unsigned flags)
+LKLAPI long lkl_sys_send(int sock, void *buffer, size_t size, unsigned flags)
 {
 	long args[6]={sock, (long)buffer, size, flags};
 	return SYSCALL(socketcall, SYS_SEND, (long)args);
 }
 
-long lkl_sys_recv(int sock, void *buffer, size_t size, unsigned flags)
+LKLAPI long lkl_sys_recv(int sock, void *buffer, size_t size, unsigned flags)
 {
 	long args[6]={sock, (long)buffer, size, flags};
 	return SYSCALL(socketcall, SYS_RECV, (long)args);
 }
 
 
-long lkl_sys_connect(int sock, struct sockaddr *saddr, int len)
+LKLAPI long lkl_sys_connect(int sock, struct sockaddr *saddr, int len)
 {
 	long args[6]={sock, (long)saddr, len};
 	return SYSCALL(socketcall, SYS_CONNECT, (long)args);
 }
 
-long lkl_sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+LKLAPI long lkl_sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	return SYSCALL(ioctl, fd, cmd, arg);
 }
 
-long lkl_sys_umask(int mask)
+LKLAPI long lkl_sys_umask(int mask)
 {
 	return SYSCALL(umask, mask);
 }
 
-long lkl_sys_getuid(void)
+LKLAPI long lkl_sys_getuid(void)
 {
 	return SYSCALL(getuid);
 }
 
-long lkl_sys_getgid(void)
+LKLAPI long lkl_sys_getgid(void)
 {
 	return SYSCALL(getgid);
 }
 
-long lkl_sys_call(long f, long arg1, long arg2, long arg3, long arg4, long arg5)
+LKLAPI long lkl_sys_call(long f, long arg1, long arg2, long arg3, long arg4, long arg5)
 {
 	return SYSCALL(call, f, arg1, arg2, arg3, arg4, arg5);
 }
 
-long lkl_sys_statfs(const char *path, struct statfs *buf)
+LKLAPI long lkl_sys_statfs(const char *path, struct __kernel_statfs *buf)
 {
 	return SYSCALL(statfs, (long)path, (long)buf);
 }
 
-long lkl_sys_access(const char *filename, int mode)
+LKLAPI long lkl_sys_access(const char *filename, int mode)
 {
 	return SYSCALL(access, (long)filename, mode);
 }
 
-long lkl_sys_truncate(const char *path, unsigned long length)
+LKLAPI long lkl_sys_truncate(const char *path, unsigned long length)
 {
 	return SYSCALL(truncate, (long)path, length);
 }
 
-ssize_t lkl_sys_pwrite64(unsigned int fd, const char *buf, size_t count, loff_t pos)
+LKLAPI ssize_t lkl_sys_pwrite64(unsigned int fd, const char *buf, size_t count, loff_t pos)
 {
 	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32),(pos & 0xffffffff));
 }
 
-ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t pos)
+LKLAPI ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t pos)
 {
 	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32),(pos & 0xffffffff));
 }
@@ -542,7 +546,7 @@ ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t pos)
  */
 void *halt_sem;
 
-long lkl_sys_halt(void)
+LKLAPI long lkl_sys_halt(void)
 {
 	int err;
 
@@ -556,7 +560,8 @@ long lkl_sys_halt(void)
 	return 0;
 }
 
-int lkl_syscall_thread_init(void)
+/* this is not used! syscalls are run in the '/init' kthread. */
+LKLAPI int lkl_syscall_thread_init(void)
 {
 	void *thread;
 	int err;
@@ -583,7 +588,8 @@ int lkl_syscall_thread_init(void)
 	return 0;
 }
 
-int lkl_syscall_thread_cleanup(void)
+/* this is not used! syscalls are run in the '/init' kthread. */
+LKLAPI int lkl_syscall_thread_cleanup(void)
 {
 	struct syscall_queue *sq;
 	void *thread;
