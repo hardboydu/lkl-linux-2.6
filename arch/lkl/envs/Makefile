@@ -9,6 +9,8 @@ _ENV+=$(if $(CONFIG_LKL_ENV_NT),nt)
 _ENV+=$(if $(CONFIG_LKL_ENV_NTK),ntk)
 _ENV+=$(if $(CONFIG_LKL_ENV_APR),apr)
 _ENV+=$(if $(CONFIG_LKL_ENV_LINUX),linux)
+_ENV+=$(if $(CONFIG_LKL_ENV_HAIKU_USER),posix)
+_ENV+=$(if $(CONFIG_LKL_ENV_HAIKU_KERNEL),khaiku)
 ENV=$(strip $(_ENV))
 
 

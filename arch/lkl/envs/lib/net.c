@@ -1,5 +1,3 @@
-#include <string.h>
-
 #include <asm/lkl.h>
 
 /* uio.h is broken */
