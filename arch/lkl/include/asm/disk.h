@@ -4,18 +4,8 @@
 #ifndef __KERNEL__
 #include <asm/lkl.h>
 #endif
-#include <linux/errno.h>
 
-#define LKL_DISK_CS_ERROR   -EIO
-#define LKL_DISK_CS_SUCCESS 0
-
-struct lkl_disk_cs {
-	void *linux_cookie;
-	int error, sync;
-};
-void lkl_disk_do_rw(void *f, unsigned long sector, unsigned long nsect,
-		    char *buffer, int dir, struct lkl_disk_cs *cs);
-
+#include <asm/disk_portable.h>
 __kernel_dev_t _lkl_disk_add_disk(void *data, int sectors);
 int _lkl_disk_del_disk(__kernel_dev_t dev);
 

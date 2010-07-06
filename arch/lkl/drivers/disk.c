@@ -45,7 +45,7 @@ static void lkl_disk_request(struct request_queue *q)
 		struct lkl_disk_cs cs;
 
 		if (! blk_fs_request(req)) {
-			printk (KERN_NOTICE "Skip non-fs request\n");
+			printk (KERN_NOTICE "lkl_disk_request: skip non-fs request\n");
 			__blk_end_request(req, -EIO, req->hard_cur_sectors << 9);
 			continue;
 		}
@@ -57,7 +57,7 @@ static void lkl_disk_request(struct request_queue *q)
 		 * Async is broken.
 		 */
 		BUG_ON (cs.sync == 0);
-		blk_end_request(req, cs.error, blk_rq_bytes(req));
+		blk_end_request(req, cs.error ? -EIO : 0, blk_rq_bytes(req));
 	}
 }
 
