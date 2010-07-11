@@ -276,10 +276,10 @@ ssize_t sys_lkl_pwrite64(unsigned int fd, const char *buf, size_t count,
 	return sys_pwrite64(fd, buf, count, ((loff_t)pos_hi<<32)+pos_lo);
 }
 
-ssize_t sys_lkl_pread64(unsigned int fd, const char *buf, size_t count,
+ssize_t sys_lkl_pread64(unsigned int fd, char *buf, size_t count,
 		       off_t pos_hi, off_t pos_lo)
 {
-	return sys_pwrite64(fd, buf, count, ((loff_t)pos_hi<<32)+pos_lo);	
+	return sys_pread64(fd, buf, count, ((loff_t)pos_hi<<32)+pos_lo);
 }
 
 
@@ -331,7 +331,7 @@ void init_syscall_table(void)
 	INIT_STE(access);
 	INIT_STE(truncate);
 	INIT_STE(lkl_pwrite64);
-	INIT_STE(lkl_pwrite64);
+	INIT_STE(lkl_pread64);
 }
 
 LKLAPI long lkl_sys_sync(void)
@@ -550,12 +550,12 @@ LKLAPI long lkl_sys_truncate(const char *path, unsigned long length)
 
 LKLAPI ssize_t lkl_sys_pwrite64(unsigned int fd, const char *buf, size_t count, loff_t pos)
 {
-	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32),(pos & 0xffffffff));
+	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32), (pos & 0xffffffff));
 }
 
 LKLAPI ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t pos)
 {
-	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32),(pos & 0xffffffff));
+	return SYSCALL(lkl_pread64, fd, (long)buf, count, (pos >> 32), (pos & 0xffffffff));
 }
 
 /* 
