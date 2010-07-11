@@ -271,6 +271,8 @@
 
 #define __ARCH_WANT_SYS_UTIME
 #define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_FADVISE64
 
 //FIXME
 #define cond_syscall(x)

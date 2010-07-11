@@ -300,12 +300,15 @@ void init_syscall_table(void)
 	INIT_STE(rename);
 	INIT_STE(flock);
 	INIT_STE(newfstat);
+	INIT_STE(fstat64);
 	INIT_STE(chmod);
 	INIT_STE(newlstat);
+	INIT_STE(lstat64);
 	INIT_STE(mkdir);
 	INIT_STE(rmdir);
 	INIT_STE(getdents);
 	INIT_STE(newstat);
+	INIT_STE(stat64);
 	INIT_STE(utimes);
 	INIT_STE(utime);
 	INIT_STE(nanosleep);
@@ -391,6 +394,11 @@ LKLAPI long lkl_sys_newfstat(unsigned int fd, struct __kernel_stat *statbuf)
 	return SYSCALL(newfstat, fd, (long)statbuf);
 }
 
+LKLAPI long lkl_sys_fstat64(unsigned int fd, struct __kernel_stat64 *statbuf)
+{
+	return SYSCALL(fstat64, fd, (long)statbuf);
+}
+
 LKLAPI long lkl_sys_chmod(const char *filename, mode_t mode)
 {
 	return SYSCALL(chmod, (long)filename, mode);
@@ -399,6 +407,11 @@ LKLAPI long lkl_sys_chmod(const char *filename, mode_t mode)
 LKLAPI long lkl_sys_newlstat(char *filename, struct __kernel_stat *statbuf)
 {
 	return SYSCALL(newlstat, (long)filename, (long)statbuf);
+}
+
+LKLAPI long lkl_sys_lstat64(char *filename, struct __kernel_stat64 *statbuf)
+{
+	return SYSCALL(lstat64, (long)filename, (long)statbuf);
 }
 
 LKLAPI long lkl_sys_mkdir(const char *pathname, int mode)
@@ -419,6 +432,11 @@ LKLAPI long lkl_sys_getdents(unsigned int fd, struct __kernel_dirent *dirent, un
 LKLAPI long lkl_sys_newstat(char *filename, struct __kernel_stat *statbuf)
 {
 	return SYSCALL(newstat, (long)filename, (long)statbuf);
+}
+
+LKLAPI long lkl_sys_stat64(char *filename, struct __kernel_stat64 *statbuf)
+{
+	return SYSCALL(stat64, (long)filename, (long)statbuf);
 }
 
 LKLAPI long lkl_sys_utimes(const char *filename, struct __kernel_timeval *utimes)
