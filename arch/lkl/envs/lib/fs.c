@@ -13,7 +13,7 @@ static void get_fs_names(char *page)
 	char *s = page;
 	int len = get_filesystem_list(page);
 	char *p, *next;
-	
+
 	page[len] = '\0';
 	for (p = page-1; p; p = next) {
 		next = strchr(++p, '\n');
@@ -23,32 +23,27 @@ static void get_fs_names(char *page)
 			;
 		s[-1] = '\0';
 	}
-	
+
 	*s = '\0';
 }
 
+
 LKLAPI long lkl_mount(char *dev, char *mnt, int flags, void *data)
 {
-	int err;
-	char *p, *fs_names=(char*)lkl_nops->mem_alloc(PAGE_SIZE);
-	
-	get_fs_names(fs_names);
-retry:
-	for (p = fs_names; *p; p += strlen(p)+1) {
-		err = lkl_sys_mount(dev, mnt, p, flags, data);
-		switch (err) {
-			case 0:
-				goto out;
-			case -EACCES:
-				flags |= MS_RDONLY;
-				goto retry;
-			case -EINVAL:
-				continue;
-		}
-	}
-out:
-	lkl_nops->mem_free(fs_names);
+	int err = 1;
+	char *p, *fs_names;
 
+	fs_names = (char*) lkl_nops->mem_alloc(PAGE_SIZE);
+	get_fs_names(fs_names);
+
+	for (p = fs_names; *p; p += strlen(p)+1)
+	{
+		err = lkl_sys_mount(dev, mnt, p, flags, data);
+		if (!err)
+			break;
+	}
+
+	lkl_nops->mem_free(fs_names);
 	return err;
 }
 
@@ -81,7 +76,7 @@ LKLAPI long lkl_mount_dev(__kernel_dev_t devt, char *fs_type, int flags,
 	if (err < 0) {
 		if (err == -ENOENT)
 			err = lkl_sys_mkdir("/mnt", 0700);
-		if (err < 0) 
+		if (err < 0)
 			return err;
 	}
 
@@ -109,13 +104,12 @@ LKLAPI long lkl_umount_dev(__kernel_dev_t dev, int flags)
 	char dev_str[] = { "/dev/xxxxxxxxxxxxxxxx" };
 	char mnt_str[] = { "/mnt/xxxxxxxxxxxxxxxx" };
 	int err;
-	
+
 
 	snprintf(dev_str, sizeof(dev_str), "/dev/%016x", dev);
 	snprintf(mnt_str, sizeof(mnt_str), "/mnt/%016x", dev);
 
-	err=lkl_sys_umount(mnt_str, 0);
-
+	err=lkl_sys_umount(mnt_str, flags);
 	if (err < 0)
 		return err;
 
