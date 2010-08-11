@@ -16,7 +16,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/slab.h>
+#include <linux/gfp.h>
 #include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -28,6 +28,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/firmware.h>
 
 #include <asm/byteorder.h>
 
@@ -52,8 +53,6 @@
 #define MAX_LUNS	8	/* 32 for 1.31 F/W */
 
 #define DEFAULT_LOOP_COUNT	10000
-
-#include "qlogicpti_asm.c"
 
 static struct qlogicpti *qptichain = NULL;
 static DEFINE_SPINLOCK(qptichain_lock);
@@ -465,16 +464,32 @@ static int qlogicpti_reset_hardware(struct Scsi_Host *host)
 
 static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 {
+	const struct firmware *fw;
+	const char fwname[] = "qlogic/isp1000.bin";
+	const __le16 *fw_data;
 	struct Scsi_Host *host = qpti->qhost;
 	unsigned short csum = 0;
 	unsigned short param[6];
-	unsigned short *risc_code, risc_code_addr, risc_code_length;
+	unsigned short risc_code_addr, risc_code_length;
+	int err;
 	unsigned long flags;
 	int i, timeout;
 
-	risc_code = &sbus_risc_code01[0];
+	err = request_firmware(&fw, fwname, &qpti->op->dev);
+	if (err) {
+		printk(KERN_ERR "Failed to load image \"%s\" err %d\n",
+		       fwname, err);
+		return err;
+	}
+	if (fw->size % 2) {
+		printk(KERN_ERR "Bogus length %zu in image \"%s\"\n",
+		       fw->size, fwname);
+		err = -EINVAL;
+		goto outfirm;
+	}
+	fw_data = (const __le16 *)&fw->data[0];
 	risc_code_addr = 0x1000;	/* all f/w modules load at 0x1000 */
-	risc_code_length = sbus_risc_code_length01;
+	risc_code_length = fw->size / 2;
 
 	spin_lock_irqsave(host->host_lock, flags);
 
@@ -482,12 +497,12 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	 * afterwards via the mailbox commands.
 	 */
 	for (i = 0; i < risc_code_length; i++)
-		csum += risc_code[i];
+		csum += __le16_to_cpu(fw_data[i]);
 	if (csum) {
-		spin_unlock_irqrestore(host->host_lock, flags);
 		printk(KERN_EMERG "qlogicpti%d: Aieee, firmware checksum failed!",
 		       qpti->qpti_id);
-		return 1;
+		err = 1;
+		goto out;
 	}		
 	sbus_writew(SBUS_CTRL_RESET, qpti->qregs + SBUS_CTRL);
 	sbus_writew((DMA_CTRL_CCLEAR | DMA_CTRL_CIRQ), qpti->qregs + CMD_DMA_CTRL);
@@ -496,9 +511,9 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	while (--timeout && (sbus_readw(qpti->qregs + SBUS_CTRL) & SBUS_CTRL_RESET))
 		udelay(20);
 	if (!timeout) {
-		spin_unlock_irqrestore(host->host_lock, flags);
 		printk(KERN_EMERG "qlogicpti%d: Cannot reset the ISP.", qpti->qpti_id);
-		return 1;
+		err = 1;
+		goto out;
 	}
 
 	sbus_writew(HCCTRL_RESET, qpti->qregs + HCCTRL);
@@ -536,21 +551,21 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	if (qlogicpti_mbox_command(qpti, param, 1)) {
 		printk(KERN_EMERG "qlogicpti%d: Cannot stop firmware for reload.\n",
 		       qpti->qpti_id);
-		spin_unlock_irqrestore(host->host_lock, flags);
-		return 1;
+		err = 1;
+		goto out;
 	}		
 
 	/* Load it up.. */
 	for (i = 0; i < risc_code_length; i++) {
 		param[0] = MBOX_WRITE_RAM_WORD;
 		param[1] = risc_code_addr + i;
-		param[2] = risc_code[i];
+		param[2] = __le16_to_cpu(fw_data[i]);
 		if (qlogicpti_mbox_command(qpti, param, 1) ||
 		    param[0] != MBOX_COMMAND_COMPLETE) {
 			printk("qlogicpti%d: Firmware dload failed, I'm bolixed!\n",
 			       qpti->qpti_id);
-			spin_unlock_irqrestore(host->host_lock, flags);
-			return 1;
+			err = 1;
+			goto out;
 		}
 	}
 
@@ -569,8 +584,8 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	    (param[0] != MBOX_COMMAND_COMPLETE)) {
 		printk(KERN_EMERG "qlogicpti%d: New firmware csum failure!\n",
 		       qpti->qpti_id);
-		spin_unlock_irqrestore(host->host_lock, flags);
-		return 1;
+		err = 1;
+		goto out;
 	}
 
 	/* Start using newly downloaded firmware. */
@@ -583,8 +598,8 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	    (param[0] != MBOX_COMMAND_COMPLETE)) {
 		printk(KERN_EMERG "qlogicpti%d: AboutFirmware cmd fails.\n",
 		       qpti->qpti_id);
-		spin_unlock_irqrestore(host->host_lock, flags);
-		return 1;
+		err = 1;
+		goto out;
 	}
 
 	/* Snag the major and minor revisions from the result. */
@@ -599,8 +614,8 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 	    (param[0] != MBOX_COMMAND_COMPLETE)) {
 		printk(KERN_EMERG "qlogicpti%d: could not set clock rate.\n",
 		       qpti->qpti_id);
-		spin_unlock_irqrestore(host->host_lock, flags);
-		return 1;
+		err = 1;
+		goto out;
 	}
 
 	if (qpti->is_pti != 0) {
@@ -616,8 +631,11 @@ static int __devinit qlogicpti_load_firmware(struct qlogicpti *qpti)
 		qlogicpti_mbox_command(qpti, param, 1);
 	}
 
+out:
 	spin_unlock_irqrestore(host->host_lock, flags);
-	return 0;
+outfirm:
+	release_firmware(fw);
+	return err;
 }
 
 static int qlogicpti_verify_tmon(struct qlogicpti *qpti)
@@ -720,7 +738,7 @@ static int __devinit qpti_register_irq(struct qlogicpti *qpti)
 	 * sanely maintain.
 	 */
 	if (request_irq(qpti->irq, qpti_intr,
-			IRQF_SHARED, "Qlogic/PTI", qpti))
+			IRQF_SHARED, "QlogicPTI", qpti))
 		goto fail;
 
 	printk("qlogicpti%d: IRQ %d ", qpti->qpti_id, qpti->irq);
@@ -737,7 +755,7 @@ static void __devinit qpti_get_scsi_id(struct qlogicpti *qpti)
 	struct of_device *op = qpti->op;
 	struct device_node *dp;
 
-	dp = op->node;
+	dp = op->dev.of_node;
 
 	qpti->scsi_id = of_getintprop_default(dp, "initiator-id", -1);
 	if (qpti->scsi_id == -1)
@@ -758,8 +776,8 @@ static void qpti_get_bursts(struct qlogicpti *qpti)
 	struct of_device *op = qpti->op;
 	u8 bursts, bmask;
 
-	bursts = of_getintprop_default(op->node, "burst-sizes", 0xff);
-	bmask = of_getintprop_default(op->node->parent, "burst-sizes", 0xff);
+	bursts = of_getintprop_default(op->dev.of_node, "burst-sizes", 0xff);
+	bmask = of_getintprop_default(op->dev.of_node->parent, "burst-sizes", 0xff);
 	if (bmask != 0xff)
 		bursts &= bmask;
 	if (bursts == 0xff ||
@@ -1275,7 +1293,7 @@ static struct scsi_host_template qpti_template = {
 static int __devinit qpti_sbus_probe(struct of_device *op, const struct of_device_id *match)
 {
 	struct scsi_host_template *tpnt = match->data;
-	struct device_node *dp = op->node;
+	struct device_node *dp = op->dev.of_node;
 	struct Scsi_Host *host;
 	struct qlogicpti *qpti;
 	static int nqptis;
@@ -1297,7 +1315,7 @@ static int __devinit qpti_sbus_probe(struct of_device *op, const struct of_devic
 	qpti->qhost = host;
 	qpti->op = op;
 	qpti->qpti_id = nqptis;
-	strcpy(qpti->prom_name, op->node->name);
+	strcpy(qpti->prom_name, op->dev.of_node->name);
 	qpti->is_pti = strcmp(qpti->prom_name, "QLGC,isp");
 
 	if (qpti_map_regs(qpti) < 0)
@@ -1438,8 +1456,11 @@ static const struct of_device_id qpti_match[] = {
 MODULE_DEVICE_TABLE(of, qpti_match);
 
 static struct of_platform_driver qpti_sbus_driver = {
-	.name		= "qpti",
-	.match_table	= qpti_match,
+	.driver = {
+		.name = "qpti",
+		.owner = THIS_MODULE,
+		.of_match_table = qpti_match,
+	},
 	.probe		= qpti_sbus_probe,
 	.remove		= __devexit_p(qpti_sbus_remove),
 };
@@ -1458,6 +1479,7 @@ MODULE_DESCRIPTION("QlogicISP SBUS driver");
 MODULE_AUTHOR("David S. Miller (davem@davemloft.net)");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("2.1");
+MODULE_FIRMWARE("qlogic/isp1000.bin");
 
 module_init(qpti_init);
 module_exit(qpti_exit);

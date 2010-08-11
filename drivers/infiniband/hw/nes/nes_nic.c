@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 - 2008 NetEffect, Inc. All rights reserved.
+ * Copyright (c) 2006 - 2009 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -40,6 +40,7 @@
 #include <linux/if_arp.h>
 #include <linux/if_vlan.h>
 #include <linux/ethtool.h>
+#include <linux/slab.h>
 #include <net/tcp.h>
 
 #include <net/inet_common.h>
@@ -111,7 +112,7 @@ static int nes_netdev_poll(struct napi_struct *napi, int budget)
 	nes_nic_ce_handler(nesdev, nescq);
 
 	if (nescq->cqes_pending == 0) {
-		netif_rx_complete(napi);
+		napi_complete(napi);
 		/* clear out completed cqes and arm */
 		nes_write32(nesdev->regs+NES_CQE_ALLOC, NES_CQE_ALLOC_NOTIFY_NEXT |
 				nescq->cq_number | (nescq->cqe_allocs_pending << 16));
@@ -400,8 +401,7 @@ static int nes_nic_send(struct sk_buff *skb, struct net_device *netdev)
 	if (skb_headlen(skb) == skb->len) {
 		if (skb_headlen(skb) <= NES_FIRST_FRAG_SIZE) {
 			nic_sqe->wqe_words[NES_NIC_SQ_WQE_LENGTH_2_1_IDX] = 0;
-			nesnic->tx_skb[nesnic->sq_head] = NULL;
-			dev_kfree_skb(skb);
+			nesnic->tx_skb[nesnic->sq_head] = skb;
 		}
 	} else {
 		/* Deal with Fragments */
@@ -453,7 +453,6 @@ static int nes_netdev_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	u32 wqe_count=1;
 	u32 send_rc;
 	struct iphdr *iph;
-	unsigned long flags;
 	__le16 *wqe_fragment_length;
 	u32 nr_frags;
 	u32 original_first_length;
@@ -480,13 +479,6 @@ static int nes_netdev_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	if (netif_queue_stopped(netdev))
 		return NETDEV_TX_BUSY;
 
-	local_irq_save(flags);
-	if (!spin_trylock(&nesnic->sq_lock)) {
-		local_irq_restore(flags);
-		nesvnic->sq_locked++;
-		return NETDEV_TX_LOCKED;
-	}
-
 	/* Check if SQ is full */
 	if ((((nesnic->sq_tail+(nesnic->sq_size*2))-nesnic->sq_head) & (nesnic->sq_size - 1)) == 1) {
 		if (!netif_queue_stopped(netdev)) {
@@ -498,7 +490,6 @@ static int nes_netdev_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 			}
 		}
 		nesvnic->sq_full++;
-		spin_unlock_irqrestore(&nesnic->sq_lock, flags);
 		return NETDEV_TX_BUSY;
 	}
 
@@ -531,7 +522,6 @@ sq_no_longer_full:
 					}
 				}
 				nesvnic->sq_full++;
-				spin_unlock_irqrestore(&nesnic->sq_lock, flags);
 				nes_debug(NES_DBG_NIC_TX, "%s: HNIC SQ full- TSO request has too many frags!\n",
 						netdev->name);
 				return NETDEV_TX_BUSY;
@@ -656,17 +646,13 @@ tso_sq_no_longer_full:
 			skb_set_transport_header(skb, hoffset);
 			skb_set_network_header(skb, nhoffset);
 			send_rc = nes_nic_send(skb, netdev);
-			if (send_rc != NETDEV_TX_OK) {
-				spin_unlock_irqrestore(&nesnic->sq_lock, flags);
+			if (send_rc != NETDEV_TX_OK)
 				return NETDEV_TX_OK;
-			}
 		}
 	} else {
 		send_rc = nes_nic_send(skb, netdev);
-		if (send_rc != NETDEV_TX_OK) {
-			spin_unlock_irqrestore(&nesnic->sq_lock, flags);
+		if (send_rc != NETDEV_TX_OK)
 			return NETDEV_TX_OK;
-		}
 	}
 
 	barrier();
@@ -676,7 +662,6 @@ tso_sq_no_longer_full:
 				(wqe_count << 24) | (1 << 23) | nesvnic->nic.qp_id);
 
 	netdev->trans_start = jiffies;
-	spin_unlock_irqrestore(&nesnic->sq_lock, flags);
 
 	return NETDEV_TX_OK;
 }
@@ -826,6 +811,20 @@ static int nes_netdev_set_mac_address(struct net_device *netdev, void *p)
 }
 
 
+static void set_allmulti(struct nes_device *nesdev, u32 nic_active_bit)
+{
+	u32 nic_active;
+
+	nic_active = nes_read_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL);
+	nic_active |= nic_active_bit;
+	nes_write_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL, nic_active);
+	nic_active = nes_read_indexed(nesdev, NES_IDX_NIC_UNICAST_ALL);
+	nic_active &= ~nic_active_bit;
+	nes_write_indexed(nesdev, NES_IDX_NIC_UNICAST_ALL, nic_active);
+}
+
+#define get_addr(addrs, index) ((addrs) + (index) * ETH_ALEN)
+
 /**
  * nes_netdev_set_multicast_list
  */
@@ -834,7 +833,6 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 	struct nes_vnic *nesvnic = netdev_priv(netdev);
 	struct nes_device *nesdev = nesvnic->nesdev;
 	struct nes_adapter *nesadapter = nesvnic->nesdev->nesadapter;
-	struct dev_mc_list *multicast_addr;
 	u32 nic_active_bit;
 	u32 nic_active;
 	u32 perfect_filter_register_address;
@@ -847,6 +845,7 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 					nics_per_function, 4);
 	u8 max_pft_entries_avaiable = NES_PFT_SIZE - pft_entries_preallocated;
 	unsigned long flags;
+	int mc_count = netdev_mc_count(netdev);
 
 	spin_lock_irqsave(&nesadapter->resource_lock, flags);
 	nic_active_bit = 1 << nesvnic->nic_index;
@@ -861,12 +860,7 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 		mc_all_on = 1;
 	} else if ((netdev->flags & IFF_ALLMULTI) ||
 			   (nesvnic->nic_index > 3)) {
-		nic_active = nes_read_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL);
-		nic_active |= nic_active_bit;
-		nes_write_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL, nic_active);
-		nic_active = nes_read_indexed(nesdev, NES_IDX_NIC_UNICAST_ALL);
-		nic_active &= ~nic_active_bit;
-		nes_write_indexed(nesdev, NES_IDX_NIC_UNICAST_ALL, nic_active);
+		set_allmulti(nesdev, nic_active_bit);
 		mc_all_on = 1;
 	} else {
 		nic_active = nes_read_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL);
@@ -878,19 +872,29 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 	}
 
 	nes_debug(NES_DBG_NIC_RX, "Number of MC entries = %d, Promiscous = %d, All Multicast = %d.\n",
-		  netdev->mc_count, !!(netdev->flags & IFF_PROMISC),
+		  mc_count, !!(netdev->flags & IFF_PROMISC),
 		  !!(netdev->flags & IFF_ALLMULTI));
 	if (!mc_all_on) {
-		multicast_addr = netdev->mc_list;
+		char *addrs;
+		int i;
+		struct netdev_hw_addr *ha;
+
+		addrs = kmalloc(ETH_ALEN * mc_count, GFP_ATOMIC);
+		if (!addrs) {
+			set_allmulti(nesdev, nic_active_bit);
+			goto unlock;
+		}
+		i = 0;
+		netdev_for_each_mc_addr(ha, netdev)
+			memcpy(get_addr(addrs, i++), ha->addr, ETH_ALEN);
+
 		perfect_filter_register_address = NES_IDX_PERFECT_FILTER_LOW +
 						pft_entries_preallocated * 0x8;
-		for (mc_index = 0; mc_index < max_pft_entries_avaiable;
-		mc_index++) {
-			while (multicast_addr && nesvnic->mcrq_mcast_filter &&
+		for (i = 0, mc_index = 0; mc_index < max_pft_entries_avaiable;
+		     mc_index++) {
+			while (i < mc_count && nesvnic->mcrq_mcast_filter &&
 			((mc_nic_index = nesvnic->mcrq_mcast_filter(nesvnic,
-					multicast_addr->dmi_addr)) == 0)) {
-				multicast_addr = multicast_addr->next;
-			}
+					get_addr(addrs, i++))) == 0));
 			if (mc_nic_index < 0)
 				mc_nic_index = nesvnic->nic_index;
 			while (nesadapter->pft_mcast_map[mc_index] < 16 &&
@@ -906,17 +910,19 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 			}
 			if (mc_index >= max_pft_entries_avaiable)
 				break;
-			if (multicast_addr) {
+			if (i < mc_count) {
+				char *addr = get_addr(addrs, i++);
+
 				nes_debug(NES_DBG_NIC_RX, "Assigning MC Address %pM to register 0x%04X nic_idx=%d\n",
-					  multicast_addr->dmi_addr,
+					  addr,
 					  perfect_filter_register_address+(mc_index * 8),
 					  mc_nic_index);
-				macaddr_high  = ((u16)multicast_addr->dmi_addr[0]) << 8;
-				macaddr_high += (u16)multicast_addr->dmi_addr[1];
-				macaddr_low   = ((u32)multicast_addr->dmi_addr[2]) << 24;
-				macaddr_low  += ((u32)multicast_addr->dmi_addr[3]) << 16;
-				macaddr_low  += ((u32)multicast_addr->dmi_addr[4]) << 8;
-				macaddr_low  += (u32)multicast_addr->dmi_addr[5];
+				macaddr_high  = ((u16) addr[0]) << 8;
+				macaddr_high += (u16) addr[1];
+				macaddr_low   = ((u32) addr[2]) << 24;
+				macaddr_low  += ((u32) addr[3]) << 16;
+				macaddr_low  += ((u32) addr[4]) << 8;
+				macaddr_low  += (u32) addr[5];
 				nes_write_indexed(nesdev,
 						perfect_filter_register_address+(mc_index * 8),
 						macaddr_low);
@@ -924,7 +930,6 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 						perfect_filter_register_address+4+(mc_index * 8),
 						(u32)macaddr_high | NES_MAC_ADDR_VALID |
 						((((u32)(1<<mc_nic_index)) << 16)));
-				multicast_addr = multicast_addr->next;
 				nesadapter->pft_mcast_map[mc_index] =
 							nesvnic->nic_index;
 			} else {
@@ -936,21 +941,13 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 				nesadapter->pft_mcast_map[mc_index] = 255;
 			}
 		}
+		kfree(addrs);
 		/* PFT is not large enough */
-		if (multicast_addr && multicast_addr->next) {
-			nic_active = nes_read_indexed(nesdev,
-						NES_IDX_NIC_MULTICAST_ALL);
-			nic_active |= nic_active_bit;
-			nes_write_indexed(nesdev, NES_IDX_NIC_MULTICAST_ALL,
-								nic_active);
-			nic_active = nes_read_indexed(nesdev,
-						NES_IDX_NIC_UNICAST_ALL);
-			nic_active &= ~nic_active_bit;
-			nes_write_indexed(nesdev, NES_IDX_NIC_UNICAST_ALL,
-								nic_active);
-		}
+		if (i < mc_count)
+			set_allmulti(nesdev, nic_active_bit);
 	}
 
+unlock:
 	spin_unlock_irqrestore(&nesadapter->resource_lock, flags);
 }
 
@@ -1004,6 +1001,7 @@ static int nes_netdev_change_mtu(struct net_device *netdev, int new_mtu)
 	return ret;
 }
 
+
 static const char nes_ethtool_stringset[][ETH_GSTRING_LEN] = {
 	"Link Change Interrupts",
 	"Linearized SKBs",
@@ -1012,18 +1010,21 @@ static const char nes_ethtool_stringset[][ETH_GSTRING_LEN] = {
 	"Pause Frames Received",
 	"Internal Routing Errors",
 	"SQ SW Dropped SKBs",
-	"SQ Locked",
 	"SQ Full",
 	"Segmented TSO Requests",
 	"Rx Symbol Errors",
 	"Rx Jabber Errors",
 	"Rx Oversized Frames",
 	"Rx Short Frames",
+	"Rx Length Errors",
+	"Rx CRC Errors",
+	"Rx Port Discard",
 	"Endnode Rx Discards",
 	"Endnode Rx Octets",
 	"Endnode Rx Frames",
 	"Endnode Tx Octets",
 	"Endnode Tx Frames",
+	"Tx Errors",
 	"mh detected",
 	"mh pauses",
 	"Retransmission Count",
@@ -1052,19 +1053,13 @@ static const char nes_ethtool_stringset[][ETH_GSTRING_LEN] = {
 	"CM Nodes Destroyed",
 	"CM Accel Drops",
 	"CM Resets Received",
+	"Free 4Kpbls",
+	"Free 256pbls",
 	"Timer Inits",
-	"CQ Depth 1",
-	"CQ Depth 4",
-	"CQ Depth 16",
-	"CQ Depth 24",
-	"CQ Depth 32",
-	"CQ Depth 128",
-	"CQ Depth 256",
 	"LRO aggregated",
 	"LRO flushed",
 	"LRO no_desc",
 };
-
 #define NES_ETHTOOL_STAT_COUNT  ARRAY_SIZE(nes_ethtool_stringset)
 
 /**
@@ -1097,11 +1092,14 @@ static int nes_netdev_set_rx_csum(struct net_device *netdev, u32 enable)
 
 
 /**
- * nes_netdev_get_stats_count
+ * nes_netdev_get_sset_count
  */
-static int nes_netdev_get_stats_count(struct net_device *netdev)
+static int nes_netdev_get_sset_count(struct net_device *netdev, int stringset)
 {
-	return NES_ETHTOOL_STAT_COUNT;
+	if (stringset == ETH_SS_STATS)
+		return NES_ETHTOOL_STAT_COUNT;
+	else
+		return -EINVAL;
 }
 
 
@@ -1121,24 +1119,27 @@ static void nes_netdev_get_strings(struct net_device *netdev, u32 stringset,
 /**
  * nes_netdev_get_ethtool_stats
  */
+
 static void nes_netdev_get_ethtool_stats(struct net_device *netdev,
 		struct ethtool_stats *target_ethtool_stats, u64 *target_stat_values)
 {
 	u64 u64temp;
 	struct nes_vnic *nesvnic = netdev_priv(netdev);
 	struct nes_device *nesdev = nesvnic->nesdev;
+	struct nes_adapter *nesadapter = nesdev->nesadapter;
 	u32 nic_count;
 	u32 u32temp;
+	u32 index = 0;
 
 	target_ethtool_stats->n_stats = NES_ETHTOOL_STAT_COUNT;
-	target_stat_values[0] = nesvnic->nesdev->link_status_interrupts;
-	target_stat_values[1] = nesvnic->linearized_skbs;
-	target_stat_values[2] = nesvnic->tso_requests;
+	target_stat_values[index] = nesvnic->nesdev->link_status_interrupts;
+	target_stat_values[++index] = nesvnic->linearized_skbs;
+	target_stat_values[++index] = nesvnic->tso_requests;
 
 	u32temp = nes_read_indexed(nesdev,
 			NES_IDX_MAC_TX_PAUSE_FRAMES + (nesvnic->nesdev->mac_index*0x200));
 	nesvnic->nesdev->mac_pause_frames_sent += u32temp;
-	target_stat_values[3] = nesvnic->nesdev->mac_pause_frames_sent;
+	target_stat_values[++index] = nesvnic->nesdev->mac_pause_frames_sent;
 
 	u32temp = nes_read_indexed(nesdev,
 			NES_IDX_MAC_RX_PAUSE_FRAMES + (nesvnic->nesdev->mac_index*0x200));
@@ -1153,6 +1154,46 @@ static void nes_netdev_get_ethtool_stats(struct net_device *netdev,
 			NES_IDX_PORT_TX_DISCARDS + (nesvnic->nesdev->mac_index*0x40));
 	nesvnic->nesdev->port_tx_discards += u32temp;
 	nesvnic->netstats.tx_dropped += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_SHORT_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->netstats.rx_dropped += u32temp;
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+	nesvnic->nesdev->mac_rx_short_frames += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_OVERSIZED_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->netstats.rx_dropped += u32temp;
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+	nesvnic->nesdev->mac_rx_oversized_frames += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_JABBER_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->netstats.rx_dropped += u32temp;
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+	nesvnic->nesdev->mac_rx_jabber_frames += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_SYMBOL_ERR_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->netstats.rx_dropped += u32temp;
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+	nesvnic->nesdev->mac_rx_symbol_err_frames += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_LENGTH_ERR_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->netstats.rx_length_errors += u32temp;
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_RX_CRC_ERR_FRAMES + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->nesdev->mac_rx_errors += u32temp;
+	nesvnic->nesdev->mac_rx_crc_errors += u32temp;
+	nesvnic->netstats.rx_crc_errors += u32temp;
+
+	u32temp = nes_read_indexed(nesdev,
+			NES_IDX_MAC_TX_ERRORS + (nesvnic->nesdev->mac_index*0x200));
+	nesvnic->nesdev->mac_tx_errors += u32temp;
+	nesvnic->netstats.tx_errors += u32temp;
 
 	for (nic_count = 0; nic_count < NES_MAX_PORT_COUNT; nic_count++) {
 		if (nesvnic->qp_nic_index[nic_count] == 0xf)
@@ -1209,63 +1250,59 @@ static void nes_netdev_get_ethtool_stats(struct net_device *netdev,
 		nesvnic->endnode_ipv4_tcp_retransmits += u32temp;
 	}
 
-	target_stat_values[4] = nesvnic->nesdev->mac_pause_frames_received;
-	target_stat_values[5] = nesdev->nesadapter->nic_rx_eth_route_err;
-	target_stat_values[6] = nesvnic->tx_sw_dropped;
-	target_stat_values[7] = nesvnic->sq_locked;
-	target_stat_values[8] = nesvnic->sq_full;
-	target_stat_values[9] = nesvnic->segmented_tso_requests;
-	target_stat_values[10] = nesvnic->nesdev->mac_rx_symbol_err_frames;
-	target_stat_values[11] = nesvnic->nesdev->mac_rx_jabber_frames;
-	target_stat_values[12] = nesvnic->nesdev->mac_rx_oversized_frames;
-	target_stat_values[13] = nesvnic->nesdev->mac_rx_short_frames;
-	target_stat_values[14] = nesvnic->endnode_nstat_rx_discard;
-	target_stat_values[15] = nesvnic->endnode_nstat_rx_octets;
-	target_stat_values[16] = nesvnic->endnode_nstat_rx_frames;
-	target_stat_values[17] = nesvnic->endnode_nstat_tx_octets;
-	target_stat_values[18] = nesvnic->endnode_nstat_tx_frames;
-	target_stat_values[19] = mh_detected;
-	target_stat_values[20] = mh_pauses_sent;
-	target_stat_values[21] = nesvnic->endnode_ipv4_tcp_retransmits;
-	target_stat_values[22] = atomic_read(&cm_connects);
-	target_stat_values[23] = atomic_read(&cm_accepts);
-	target_stat_values[24] = atomic_read(&cm_disconnects);
-	target_stat_values[25] = atomic_read(&cm_connecteds);
-	target_stat_values[26] = atomic_read(&cm_connect_reqs);
-	target_stat_values[27] = atomic_read(&cm_rejects);
-	target_stat_values[28] = atomic_read(&mod_qp_timouts);
-	target_stat_values[29] = atomic_read(&qps_created);
-	target_stat_values[30] = atomic_read(&sw_qps_destroyed);
-	target_stat_values[31] = atomic_read(&qps_destroyed);
-	target_stat_values[32] = atomic_read(&cm_closes);
-	target_stat_values[33] = cm_packets_sent;
-	target_stat_values[34] = cm_packets_bounced;
-	target_stat_values[35] = cm_packets_created;
-	target_stat_values[36] = cm_packets_received;
-	target_stat_values[37] = cm_packets_dropped;
-	target_stat_values[38] = cm_packets_retrans;
-	target_stat_values[39] = cm_listens_created;
-	target_stat_values[40] = cm_listens_destroyed;
-	target_stat_values[41] = cm_backlog_drops;
-	target_stat_values[42] = atomic_read(&cm_loopbacks);
-	target_stat_values[43] = atomic_read(&cm_nodes_created);
-	target_stat_values[44] = atomic_read(&cm_nodes_destroyed);
-	target_stat_values[45] = atomic_read(&cm_accel_dropped_pkts);
-	target_stat_values[46] = atomic_read(&cm_resets_recvd);
-	target_stat_values[47] = int_mod_timer_init;
-	target_stat_values[48] = int_mod_cq_depth_1;
-	target_stat_values[49] = int_mod_cq_depth_4;
-	target_stat_values[50] = int_mod_cq_depth_16;
-	target_stat_values[51] = int_mod_cq_depth_24;
-	target_stat_values[52] = int_mod_cq_depth_32;
-	target_stat_values[53] = int_mod_cq_depth_128;
-	target_stat_values[54] = int_mod_cq_depth_256;
-	target_stat_values[55] = nesvnic->lro_mgr.stats.aggregated;
-	target_stat_values[56] = nesvnic->lro_mgr.stats.flushed;
-	target_stat_values[57] = nesvnic->lro_mgr.stats.no_desc;
-
+	target_stat_values[++index] = nesvnic->nesdev->mac_pause_frames_received;
+	target_stat_values[++index] = nesdev->nesadapter->nic_rx_eth_route_err;
+	target_stat_values[++index] = nesvnic->tx_sw_dropped;
+	target_stat_values[++index] = nesvnic->sq_full;
+	target_stat_values[++index] = nesvnic->segmented_tso_requests;
+	target_stat_values[++index] = nesvnic->nesdev->mac_rx_symbol_err_frames;
+	target_stat_values[++index] = nesvnic->nesdev->mac_rx_jabber_frames;
+	target_stat_values[++index] = nesvnic->nesdev->mac_rx_oversized_frames;
+	target_stat_values[++index] = nesvnic->nesdev->mac_rx_short_frames;
+	target_stat_values[++index] = nesvnic->netstats.rx_length_errors;
+	target_stat_values[++index] = nesvnic->nesdev->mac_rx_crc_errors;
+	target_stat_values[++index] = nesvnic->nesdev->port_rx_discards;
+	target_stat_values[++index] = nesvnic->endnode_nstat_rx_discard;
+	target_stat_values[++index] = nesvnic->endnode_nstat_rx_octets;
+	target_stat_values[++index] = nesvnic->endnode_nstat_rx_frames;
+	target_stat_values[++index] = nesvnic->endnode_nstat_tx_octets;
+	target_stat_values[++index] = nesvnic->endnode_nstat_tx_frames;
+	target_stat_values[++index] = nesvnic->nesdev->mac_tx_errors;
+	target_stat_values[++index] = mh_detected;
+	target_stat_values[++index] = mh_pauses_sent;
+	target_stat_values[++index] = nesvnic->endnode_ipv4_tcp_retransmits;
+	target_stat_values[++index] = atomic_read(&cm_connects);
+	target_stat_values[++index] = atomic_read(&cm_accepts);
+	target_stat_values[++index] = atomic_read(&cm_disconnects);
+	target_stat_values[++index] = atomic_read(&cm_connecteds);
+	target_stat_values[++index] = atomic_read(&cm_connect_reqs);
+	target_stat_values[++index] = atomic_read(&cm_rejects);
+	target_stat_values[++index] = atomic_read(&mod_qp_timouts);
+	target_stat_values[++index] = atomic_read(&qps_created);
+	target_stat_values[++index] = atomic_read(&sw_qps_destroyed);
+	target_stat_values[++index] = atomic_read(&qps_destroyed);
+	target_stat_values[++index] = atomic_read(&cm_closes);
+	target_stat_values[++index] = cm_packets_sent;
+	target_stat_values[++index] = cm_packets_bounced;
+	target_stat_values[++index] = cm_packets_created;
+	target_stat_values[++index] = cm_packets_received;
+	target_stat_values[++index] = cm_packets_dropped;
+	target_stat_values[++index] = cm_packets_retrans;
+	target_stat_values[++index] = atomic_read(&cm_listens_created);
+	target_stat_values[++index] = atomic_read(&cm_listens_destroyed);
+	target_stat_values[++index] = cm_backlog_drops;
+	target_stat_values[++index] = atomic_read(&cm_loopbacks);
+	target_stat_values[++index] = atomic_read(&cm_nodes_created);
+	target_stat_values[++index] = atomic_read(&cm_nodes_destroyed);
+	target_stat_values[++index] = atomic_read(&cm_accel_dropped_pkts);
+	target_stat_values[++index] = atomic_read(&cm_resets_recvd);
+	target_stat_values[++index] = nesadapter->free_4kpbl;
+	target_stat_values[++index] = nesadapter->free_256pbl;
+	target_stat_values[++index] = int_mod_timer_init;
+	target_stat_values[++index] = nesvnic->lro_mgr.stats.aggregated;
+	target_stat_values[++index] = nesvnic->lro_mgr.stats.flushed;
+	target_stat_values[++index] = nesvnic->lro_mgr.stats.no_desc;
 }
-
 
 /**
  * nes_netdev_get_drvinfo
@@ -1281,7 +1318,6 @@ static void nes_netdev_get_drvinfo(struct net_device *netdev,
 	sprintf(drvinfo->fw_version, "%u.%u", nesadapter->firmware_version>>16,
 				nesadapter->firmware_version & 0x000000ff);
 	strcpy(drvinfo->version, DRV_VERSION);
-	drvinfo->n_stats = nes_netdev_get_stats_count(netdev);
 	drvinfo->testinfo_len = 0;
 	drvinfo->eedump_len = 0;
 	drvinfo->regdump_len = 0;
@@ -1443,49 +1479,58 @@ static int nes_netdev_get_settings(struct net_device *netdev, struct ethtool_cmd
 	struct nes_vnic *nesvnic = netdev_priv(netdev);
 	struct nes_device *nesdev = nesvnic->nesdev;
 	struct nes_adapter *nesadapter = nesdev->nesadapter;
+	u32 mac_index = nesdev->mac_index;
+	u8 phy_type = nesadapter->phy_type[mac_index];
+	u8 phy_index = nesadapter->phy_index[mac_index];
 	u16 phy_data;
 
 	et_cmd->duplex = DUPLEX_FULL;
 	et_cmd->port   = PORT_MII;
+	et_cmd->maxtxpkt = 511;
+	et_cmd->maxrxpkt = 511;
 
 	if (nesadapter->OneG_Mode) {
 		et_cmd->speed = SPEED_1000;
-		if (nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_PUMA_1G) {
+		if (phy_type == NES_PHY_TYPE_PUMA_1G) {
 			et_cmd->supported   = SUPPORTED_1000baseT_Full;
 			et_cmd->advertising = ADVERTISED_1000baseT_Full;
 			et_cmd->autoneg     = AUTONEG_DISABLE;
 			et_cmd->transceiver = XCVR_INTERNAL;
-			et_cmd->phy_address = nesdev->mac_index;
+			et_cmd->phy_address = mac_index;
 		} else {
-			et_cmd->supported   = SUPPORTED_1000baseT_Full | SUPPORTED_Autoneg;
-			et_cmd->advertising = ADVERTISED_1000baseT_Full | ADVERTISED_Autoneg;
-			nes_read_1G_phy_reg(nesdev, 0, nesadapter->phy_index[nesdev->mac_index], &phy_data);
+			unsigned long flags;
+			et_cmd->supported   = SUPPORTED_1000baseT_Full
+					    | SUPPORTED_Autoneg;
+			et_cmd->advertising = ADVERTISED_1000baseT_Full
+					    | ADVERTISED_Autoneg;
+			spin_lock_irqsave(&nesadapter->phy_lock, flags);
+			nes_read_1G_phy_reg(nesdev, 0, phy_index, &phy_data);
+			spin_unlock_irqrestore(&nesadapter->phy_lock, flags);
 			if (phy_data & 0x1000)
 				et_cmd->autoneg = AUTONEG_ENABLE;
 			else
 				et_cmd->autoneg = AUTONEG_DISABLE;
 			et_cmd->transceiver = XCVR_EXTERNAL;
-			et_cmd->phy_address = nesadapter->phy_index[nesdev->mac_index];
+			et_cmd->phy_address = phy_index;
 		}
-	} else {
-		if ((nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_IRIS) ||
-		    (nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_ARGUS)) {
-			et_cmd->transceiver = XCVR_EXTERNAL;
-			et_cmd->port        = PORT_FIBRE;
-			et_cmd->supported   = SUPPORTED_FIBRE;
-			et_cmd->advertising = ADVERTISED_FIBRE;
-			et_cmd->phy_address = nesadapter->phy_index[nesdev->mac_index];
-		} else {
-			et_cmd->transceiver = XCVR_INTERNAL;
-			et_cmd->supported   = SUPPORTED_10000baseT_Full;
-			et_cmd->advertising = ADVERTISED_10000baseT_Full;
-			et_cmd->phy_address = nesdev->mac_index;
-		}
-		et_cmd->speed = SPEED_10000;
-		et_cmd->autoneg = AUTONEG_DISABLE;
+		return 0;
 	}
-	et_cmd->maxtxpkt = 511;
-	et_cmd->maxrxpkt = 511;
+	if ((phy_type == NES_PHY_TYPE_ARGUS) ||
+	    (phy_type == NES_PHY_TYPE_SFP_D) ||
+	    (phy_type == NES_PHY_TYPE_KR)) {
+		et_cmd->transceiver = XCVR_EXTERNAL;
+		et_cmd->port        = PORT_FIBRE;
+		et_cmd->supported   = SUPPORTED_FIBRE;
+		et_cmd->advertising = ADVERTISED_FIBRE;
+		et_cmd->phy_address = phy_index;
+	} else {
+		et_cmd->transceiver = XCVR_INTERNAL;
+		et_cmd->supported   = SUPPORTED_10000baseT_Full;
+		et_cmd->advertising = ADVERTISED_10000baseT_Full;
+		et_cmd->phy_address = mac_index;
+	}
+	et_cmd->speed = SPEED_10000;
+	et_cmd->autoneg = AUTONEG_DISABLE;
 	return 0;
 }
 
@@ -1498,12 +1543,15 @@ static int nes_netdev_set_settings(struct net_device *netdev, struct ethtool_cmd
 	struct nes_vnic *nesvnic = netdev_priv(netdev);
 	struct nes_device *nesdev = nesvnic->nesdev;
 	struct nes_adapter *nesadapter = nesdev->nesadapter;
-	u16 phy_data;
 
 	if ((nesadapter->OneG_Mode) &&
 	    (nesadapter->phy_type[nesdev->mac_index] != NES_PHY_TYPE_PUMA_1G)) {
-		nes_read_1G_phy_reg(nesdev, 0, nesadapter->phy_index[nesdev->mac_index],
-				&phy_data);
+		unsigned long flags;
+		u16 phy_data;
+		u8 phy_index = nesadapter->phy_index[nesdev->mac_index];
+
+		spin_lock_irqsave(&nesadapter->phy_lock, flags);
+		nes_read_1G_phy_reg(nesdev, 0, phy_index, &phy_data);
 		if (et_cmd->autoneg) {
 			/* Turn on Full duplex, Autoneg, and restart autonegotiation */
 			phy_data |= 0x1300;
@@ -1511,15 +1559,15 @@ static int nes_netdev_set_settings(struct net_device *netdev, struct ethtool_cmd
 			/* Turn off autoneg */
 			phy_data &= ~0x1000;
 		}
-		nes_write_1G_phy_reg(nesdev, 0, nesadapter->phy_index[nesdev->mac_index],
-				phy_data);
+		nes_write_1G_phy_reg(nesdev, 0, phy_index, phy_data);
+		spin_unlock_irqrestore(&nesadapter->phy_lock, flags);
 	}
 
 	return 0;
 }
 
 
-static struct ethtool_ops nes_ethtool_ops = {
+static const struct ethtool_ops nes_ethtool_ops = {
 	.get_link = ethtool_op_get_link,
 	.get_settings = nes_netdev_get_settings,
 	.set_settings = nes_netdev_set_settings,
@@ -1527,7 +1575,7 @@ static struct ethtool_ops nes_ethtool_ops = {
 	.get_rx_csum = nes_netdev_get_rx_csum,
 	.get_sg = ethtool_op_get_sg,
 	.get_strings = nes_netdev_get_strings,
-	.get_stats_count = nes_netdev_get_stats_count,
+	.get_sset_count = nes_netdev_get_sset_count,
 	.get_ethtool_stats = nes_netdev_get_ethtool_stats,
 	.get_drvinfo = nes_netdev_get_drvinfo,
 	.get_coalesce = nes_netdev_get_coalesce,
@@ -1568,6 +1616,18 @@ static void nes_netdev_vlan_rx_register(struct net_device *netdev, struct vlan_g
 	spin_unlock_irqrestore(&nesadapter->phy_lock, flags);
 }
 
+static const struct net_device_ops nes_netdev_ops = {
+	.ndo_open 		= nes_netdev_open,
+	.ndo_stop		= nes_netdev_stop,
+	.ndo_start_xmit 	= nes_netdev_start_xmit,
+	.ndo_get_stats		= nes_netdev_get_stats,
+	.ndo_tx_timeout 	= nes_netdev_tx_timeout,
+	.ndo_set_mac_address	= nes_netdev_set_mac_address,
+	.ndo_set_multicast_list = nes_netdev_set_multicast_list,
+	.ndo_change_mtu		= nes_netdev_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_vlan_rx_register 	= nes_netdev_vlan_rx_register,
+};
 
 /**
  * nes_netdev_init - initialize network device
@@ -1576,34 +1636,22 @@ struct net_device *nes_netdev_init(struct nes_device *nesdev,
 		void __iomem *mmio_addr)
 {
 	u64 u64temp;
-	struct nes_vnic *nesvnic = NULL;
+	struct nes_vnic *nesvnic;
 	struct net_device *netdev;
 	struct nic_qp_map *curr_qp_map;
-	u32 u32temp;
-	u16 phy_data;
-	u16 temp_phy_data;
+	u8 phy_type = nesdev->nesadapter->phy_type[nesdev->mac_index];
 
 	netdev = alloc_etherdev(sizeof(struct nes_vnic));
 	if (!netdev) {
 		printk(KERN_ERR PFX "nesvnic etherdev alloc failed");
 		return NULL;
 	}
+	nesvnic = netdev_priv(netdev);
 
 	nes_debug(NES_DBG_INIT, "netdev = %p, %s\n", netdev, netdev->name);
 
 	SET_NETDEV_DEV(netdev, &nesdev->pcidev->dev);
 
-	nesvnic = netdev_priv(netdev);
-	memset(nesvnic, 0, sizeof(*nesvnic));
-
-	netdev->open = nes_netdev_open;
-	netdev->stop = nes_netdev_stop;
-	netdev->hard_start_xmit = nes_netdev_start_xmit;
-	netdev->get_stats = nes_netdev_get_stats;
-	netdev->tx_timeout = nes_netdev_tx_timeout;
-	netdev->set_mac_address = nes_netdev_set_mac_address;
-	netdev->set_multicast_list = nes_netdev_set_multicast_list;
-	netdev->change_mtu = nes_netdev_change_mtu;
 	netdev->watchdog_timeo = NES_TX_TIMEOUT;
 	netdev->irq = nesdev->pcidev->irq;
 	netdev->mtu = ETH_DATA_LEN;
@@ -1611,12 +1659,11 @@ struct net_device *nes_netdev_init(struct nes_device *nesdev,
 	netdev->addr_len = ETH_ALEN;
 	netdev->type = ARPHRD_ETHER;
 	netdev->features = NETIF_F_HIGHDMA;
+	netdev->netdev_ops = &nes_netdev_ops;
 	netdev->ethtool_ops = &nes_ethtool_ops;
 	netif_napi_add(netdev, &nesvnic->napi, nes_netdev_poll, 128);
 	nes_debug(NES_DBG_INIT, "Enabling VLAN Insert/Delete.\n");
 	netdev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-	netdev->vlan_rx_register = nes_netdev_vlan_rx_register;
-	netdev->features |= NETIF_F_LLTX;
 
 	/* Fill in the port structure */
 	nesvnic->netdev = netdev;
@@ -1700,66 +1747,51 @@ struct net_device *nes_netdev_init(struct nes_device *nesdev,
 
 	if ((nesdev->netdev_count == 0) &&
 	    ((PCI_FUNC(nesdev->pcidev->devfn) == nesdev->mac_index) ||
-	     ((nesdev->nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_PUMA_1G) &&
+	     ((phy_type == NES_PHY_TYPE_PUMA_1G) &&
 	      (((PCI_FUNC(nesdev->pcidev->devfn) == 1) && (nesdev->mac_index == 2)) ||
 	       ((PCI_FUNC(nesdev->pcidev->devfn) == 2) && (nesdev->mac_index == 1)))))) {
-		/*
-		 * nes_debug(NES_DBG_INIT, "Setting up PHY interrupt mask. Using register index 0x%04X\n",
-		 *		NES_IDX_PHY_PCS_CONTROL_STATUS0 + (0x200 * (nesvnic->logical_port & 1)));
-		 */
+		u32 u32temp;
+		u32 link_mask;
+		u32 link_val;
+
 		u32temp = nes_read_indexed(nesdev, NES_IDX_PHY_PCS_CONTROL_STATUS0 +
 				(0x200 * (nesdev->mac_index & 1)));
-		if (nesdev->nesadapter->phy_type[nesdev->mac_index] != NES_PHY_TYPE_PUMA_1G) {
+		if (phy_type != NES_PHY_TYPE_PUMA_1G) {
 			u32temp |= 0x00200000;
 			nes_write_indexed(nesdev, NES_IDX_PHY_PCS_CONTROL_STATUS0 +
 				(0x200 * (nesdev->mac_index & 1)), u32temp);
 		}
 
-		u32temp = nes_read_indexed(nesdev, NES_IDX_PHY_PCS_CONTROL_STATUS0 +
-				(0x200 * (nesdev->mac_index & 1)));
-
-		if ((u32temp&0x0f1f0000) == 0x0f0f0000) {
-			if (nesdev->nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_IRIS) {
-				nes_init_phy(nesdev);
-				nes_read_10G_phy_reg(nesdev, nesdev->nesadapter->phy_index[nesdev->mac_index], 1, 1);
-				temp_phy_data = (u16)nes_read_indexed(nesdev,
-									NES_IDX_MAC_MDIO_CONTROL);
-				u32temp = 20;
-				do {
-					nes_read_10G_phy_reg(nesdev, nesdev->nesadapter->phy_index[nesdev->mac_index], 1, 1);
-					phy_data = (u16)nes_read_indexed(nesdev,
-									NES_IDX_MAC_MDIO_CONTROL);
-					if ((phy_data == temp_phy_data) || (!(--u32temp)))
-						break;
-					temp_phy_data = phy_data;
-				} while (1);
-				if (phy_data & 4) {
-					nes_debug(NES_DBG_INIT, "The Link is UP!!.\n");
-					nesvnic->linkup = 1;
-				} else {
-					nes_debug(NES_DBG_INIT, "The Link is DOWN!!.\n");
-				}
+		/* Check and set linkup here.  This is for back to back */
+		/* configuration where second port won't get link interrupt */
+		switch (phy_type) {
+		case NES_PHY_TYPE_PUMA_1G:
+			if (nesdev->mac_index < 2) {
+				link_mask = 0x01010000;
+				link_val = 0x01010000;
 			} else {
-				nes_debug(NES_DBG_INIT, "The Link is UP!!.\n");
-				nesvnic->linkup = 1;
+				link_mask = 0x02020000;
+				link_val = 0x02020000;
 			}
-		} else if (nesdev->nesadapter->phy_type[nesdev->mac_index] == NES_PHY_TYPE_PUMA_1G) {
-			nes_debug(NES_DBG_INIT, "mac_index=%d, logical_port=%d, u32temp=0x%04X, PCI_FUNC=%d\n",
-				nesdev->mac_index, nesvnic->logical_port, u32temp, PCI_FUNC(nesdev->pcidev->devfn));
-			if (((nesdev->mac_index < 2) && ((u32temp&0x01010000) == 0x01010000)) ||
-			    ((nesdev->mac_index > 1) && ((u32temp&0x02020000) == 0x02020000)))  {
-				nes_debug(NES_DBG_INIT, "The Link is UP!!.\n");
-				nesvnic->linkup = 1;
-			}
+			break;
+		default:
+			link_mask = 0x0f1f0000;
+			link_val = 0x0f0f0000;
+			break;
 		}
+
+		u32temp = nes_read_indexed(nesdev,
+					   NES_IDX_PHY_PCS_CONTROL_STATUS0 +
+					   (0x200 * (nesdev->mac_index & 1)));
+		if ((u32temp & link_mask) == link_val)
+			nesvnic->linkup = 1;
+
 		/* clear the MAC interrupt status, assumes direct logical to physical mapping */
 		u32temp = nes_read_indexed(nesdev, NES_IDX_MAC_INT_STATUS + (0x200 * nesdev->mac_index));
 		nes_debug(NES_DBG_INIT, "Phy interrupt status = 0x%X.\n", u32temp);
 		nes_write_indexed(nesdev, NES_IDX_MAC_INT_STATUS + (0x200 * nesdev->mac_index), u32temp);
 
-		if (nesdev->nesadapter->phy_type[nesdev->mac_index] != NES_PHY_TYPE_IRIS)
-			nes_init_phy(nesdev);
-
+		nes_init_phy(nesdev);
 	}
 
 	return netdev;

@@ -6,7 +6,7 @@
 #include <linux/log2.h>
 #include <linux/usb.h>
 #include <linux/wait.h>
-#include "hcd.h"
+#include <linux/usb/hcd.h>
 
 #define to_urb(d) container_of(d, struct urb, kref)
 
@@ -241,6 +241,12 @@ EXPORT_SYMBOL_GPL(usb_unanchor_urb);
  * If the USB subsystem can't allocate sufficient bandwidth to perform
  * the periodic request, submitting such a periodic request should fail.
  *
+ * For devices under xHCI, the bandwidth is reserved at configuration time, or
+ * when the alt setting is selected.  If there is not enough bus bandwidth, the
+ * configuration/alt setting request will fail.  Therefore, submissions to
+ * periodic endpoints on devices under xHCI should never fail due to bandwidth
+ * constraints.
+ *
  * Device drivers must explicitly request that repetition, by ensuring that
  * some URB is always on the endpoint's queue (except possibly for short
  * periods during completion callacks).  When there is no longer an urb
@@ -295,15 +301,14 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	if (!urb || urb->hcpriv || !urb->complete)
 		return -EINVAL;
 	dev = urb->dev;
-	if ((!dev) || (dev->state < USB_STATE_DEFAULT))
+	if ((!dev) || (dev->state < USB_STATE_UNAUTHENTICATED))
 		return -ENODEV;
 
 	/* For now, get the endpoint from the pipe.  Eventually drivers
 	 * will be required to set urb->ep directly and we will eliminate
 	 * urb->pipe.
 	 */
-	ep = (usb_pipein(urb->pipe) ? dev->ep_in : dev->ep_out)
-			[usb_pipeendpoint(urb->pipe)];
+	ep = usb_pipe_endpoint(dev, urb->pipe);
 	if (!ep)
 		return -ENOENT;
 
@@ -327,9 +332,12 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 		is_out = usb_endpoint_dir_out(&ep->desc);
 	}
 
-	/* Cache the direction for later use */
-	urb->transfer_flags = (urb->transfer_flags & ~URB_DIR_MASK) |
-			(is_out ? URB_DIR_OUT : URB_DIR_IN);
+	/* Clear the internal flags and cache the direction for later use */
+	urb->transfer_flags &= ~(URB_DIR_MASK | URB_DMA_MAP_SINGLE |
+			URB_DMA_MAP_PAGE | URB_DMA_MAP_SG | URB_MAP_LOCAL |
+			URB_SETUP_MAP_SINGLE | URB_SETUP_MAP_LOCAL |
+			URB_DMA_SG_COMBINED);
+	urb->transfer_flags |= (is_out ? URB_DIR_OUT : URB_DIR_IN);
 
 	if (xfertype != USB_ENDPOINT_XFER_CONTROL &&
 			dev->state < USB_STATE_CONFIGURED)
@@ -351,6 +359,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	if (xfertype == USB_ENDPOINT_XFER_ISOC) {
 		int	n, len;
 
+		/* FIXME SuperSpeed isoc endpoints have up to 16 bursts */
 		/* "high bandwidth" mode, 1-3 packets/uframe? */
 		if (dev->speed == USB_SPEED_HIGH) {
 			int	mult = 1 + ((max >> 11) & 0x03);
@@ -370,7 +379,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	}
 
 	/* the I/O buffer must be mapped/unmapped, except when length=0 */
-	if (urb->transfer_buffer_length < 0)
+	if (urb->transfer_buffer_length > INT_MAX)
 		return -EMSGSIZE;
 
 #ifdef DEBUG
@@ -380,10 +389,17 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	{
 	unsigned int	orig_flags = urb->transfer_flags;
 	unsigned int	allowed;
+	static int pipetypes[4] = {
+		PIPE_CONTROL, PIPE_ISOCHRONOUS, PIPE_BULK, PIPE_INTERRUPT
+	};
+
+	/* Check that the pipe's type matches the endpoint's type */
+	if (usb_pipetype(urb->pipe) != pipetypes[xfertype])
+		return -EPIPE;		/* The most suitable error code :-) */
 
 	/* enforce simple/standard policy */
-	allowed = (URB_NO_TRANSFER_DMA_MAP | URB_NO_SETUP_DMA_MAP |
-			URB_NO_INTERRUPT | URB_DIR_MASK | URB_FREE_BUFFER);
+	allowed = (URB_NO_TRANSFER_DMA_MAP | URB_NO_INTERRUPT | URB_DIR_MASK |
+			URB_FREE_BUFFER);
 	switch (xfertype) {
 	case USB_ENDPOINT_XFER_BULK:
 		if (is_out)
@@ -422,10 +438,28 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	case USB_ENDPOINT_XFER_ISOC:
 	case USB_ENDPOINT_XFER_INT:
 		/* too small? */
-		if (urb->interval <= 0)
-			return -EINVAL;
+		switch (dev->speed) {
+		case USB_SPEED_WIRELESS:
+			if (urb->interval < 6)
+				return -EINVAL;
+			break;
+		default:
+			if (urb->interval <= 0)
+				return -EINVAL;
+			break;
+		}
 		/* too big? */
 		switch (dev->speed) {
+		case USB_SPEED_SUPER:	/* units are 125us */
+			/* Handle up to 2^(16-1) microframes */
+			if (urb->interval > (1 << 15))
+				return -EINVAL;
+			max = 1 << 15;
+			break;
+		case USB_SPEED_WIRELESS:
+			if (urb->interval > 16)
+				return -EINVAL;
+			break;
 		case USB_SPEED_HIGH:	/* units are microframes */
 			/* NOTE usb handles 2^15 */
 			if (urb->interval > (1024 * 8))
@@ -449,8 +483,10 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 		default:
 			return -EINVAL;
 		}
-		/* Round down to a power of 2, no more than max */
-		urb->interval = min(max, 1 << ilog2(urb->interval));
+		if (dev->speed != USB_SPEED_WIRELESS) {
+			/* Round down to a power of 2, no more than max */
+			urb->interval = min(max, 1 << ilog2(urb->interval));
+		}
 	}
 
 	return usb_hcd_submit_urb(urb, mem_flags);

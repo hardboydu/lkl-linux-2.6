@@ -26,6 +26,7 @@
 #include <linux/kmod.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
@@ -34,11 +35,8 @@
 #include "cx23885.h"
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
-
-#ifdef CONFIG_VIDEO_V4L1_COMPAT
-/* Include V4L1 specific functions. Should be removed soon */
-#include <linux/videodev.h>
-#endif
+#include "cx23885-ioctl.h"
+#include "tuner-xc2028.h"
 
 MODULE_DESCRIPTION("v4l2 driver module for cx23885 based TV cards");
 MODULE_AUTHOR("Steven Toth <stoth@linuxtv.org>");
@@ -244,6 +242,7 @@ static struct cx23885_ctrl cx23885_ctls[] = {
 };
 static const int CX23885_CTLS = ARRAY_SIZE(cx23885_ctls);
 
+/* Must be sorted from low to high control ID! */
 static const u32 cx23885_user_ctrls[] = {
 	V4L2_CID_USER_CLASS,
 	V4L2_CID_BRIGHTNESS,
@@ -303,11 +302,7 @@ static int cx23885_set_tvnorm(struct cx23885_dev *dev, v4l2_std_id norm)
 
 	dev->tvnorm = norm;
 
-	/* Tell the analog tuner/demods */
-	cx23885_call_i2c_clients(&dev->i2c_bus[1], VIDIOC_S_STD, &norm);
-
-	/* Tell the internal A/V decoder */
-	cx23885_call_i2c_clients(&dev->i2c_bus[2], VIDIOC_S_STD, &norm);
+	call_all(dev, core, s_std, norm);
 
 	return 0;
 }
@@ -324,11 +319,11 @@ static struct video_device *cx23885_vdev_init(struct cx23885_dev *dev,
 	if (NULL == vfd)
 		return NULL;
 	*vfd = *template;
-	vfd->minor   = -1;
-	vfd->parent  = &pci->dev;
+	vfd->v4l2_dev = &dev->v4l2_dev;
 	vfd->release = video_device_release;
 	snprintf(vfd->name, sizeof(vfd->name), "%s %s (%s)",
 		 dev->name, type, cx23885_boards[dev->board].name);
+	video_set_drvdata(vfd, dev);
 	return vfd;
 }
 
@@ -401,9 +396,6 @@ static void res_free(struct cx23885_dev *dev, struct cx23885_fh *fh,
 
 static int cx23885_video_mux(struct cx23885_dev *dev, unsigned int input)
 {
-	struct v4l2_routing route;
-	memset(&route, 0, sizeof(route));
-
 	dprintk(1, "%s() video_mux: %d [vmux=%d, gpio=0x%x,0x%x,0x%x,0x%x]\n",
 		__func__,
 		input, INPUT(input)->vmux,
@@ -411,11 +403,16 @@ static int cx23885_video_mux(struct cx23885_dev *dev, unsigned int input)
 		INPUT(input)->gpio2, INPUT(input)->gpio3);
 	dev->input = input;
 
-	route.input = INPUT(input)->vmux;
+	if (dev->board == CX23885_BOARD_MYGICA_X8506 ||
+		dev->board == CX23885_BOARD_MAGICPRO_PROHDTVE2) {
+		/* Select Analog TV */
+		if (INPUT(input)->type == CX23885_VMUX_TELEVISION)
+			cx23885_gpio_clear(dev, GPIO_0);
+	}
 
 	/* Tell the internal A/V decoder */
-	cx23885_call_i2c_clients(&dev->i2c_bus[2],
-		VIDIOC_INT_S_VIDEO_ROUTING, &route);
+	v4l2_subdev_call(dev->sd_cx25840, video, s_routing,
+			INPUT(input)->vmux, 0, 0);
 
 	return 0;
 }
@@ -517,8 +514,8 @@ static int buffer_setup(struct videobuf_queue *q, unsigned int *count,
 	*size = fh->fmt->depth*fh->width*fh->height >> 3;
 	if (0 == *count)
 		*count = 32;
-	while (*size * *count > vid_limit * 1024 * 1024)
-		(*count)--;
+	if (*size * *count > vid_limit * 1024 * 1024)
+		*count = (vid_limit * 1024 * 1024) / *size;
 	return 0;
 }
 
@@ -720,46 +717,34 @@ static int get_resource(struct cx23885_fh *fh)
 
 static int video_open(struct file *file)
 {
-	int minor = video_devdata(file)->minor;
-	struct cx23885_dev *h, *dev = NULL;
+	struct video_device *vdev = video_devdata(file);
+	struct cx23885_dev *dev = video_drvdata(file);
 	struct cx23885_fh *fh;
-	struct list_head *list;
 	enum v4l2_buf_type type = 0;
 	int radio = 0;
 
-	lock_kernel();
-	list_for_each(list, &cx23885_devlist) {
-		h = list_entry(list, struct cx23885_dev, devlist);
-		if (h->video_dev &&
-		    h->video_dev->minor == minor) {
-			dev  = h;
-			type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		}
-		if (h->vbi_dev &&
-		    h->vbi_dev->minor == minor) {
-			dev  = h;
-			type = V4L2_BUF_TYPE_VBI_CAPTURE;
-		}
-		if (h->radio_dev &&
-		    h->radio_dev->minor == minor) {
-			radio = 1;
-			dev   = h;
-		}
-	}
-	if (NULL == dev) {
-		unlock_kernel();
-		return -ENODEV;
+	switch (vdev->vfl_type) {
+	case VFL_TYPE_GRABBER:
+		type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		break;
+	case VFL_TYPE_VBI:
+		type = V4L2_BUF_TYPE_VBI_CAPTURE;
+		break;
+	case VFL_TYPE_RADIO:
+		radio = 1;
+		break;
 	}
 
-	dprintk(1, "open minor=%d radio=%d type=%s\n",
-		minor, radio, v4l2_type_names[type]);
+	dprintk(1, "open dev=%s radio=%d type=%s\n",
+		video_device_node_name(vdev), radio, v4l2_type_names[type]);
 
 	/* allocate + initialize per filehandle data */
 	fh = kzalloc(sizeof(*fh), GFP_KERNEL);
-	if (NULL == fh) {
-		unlock_kernel();
+	if (NULL == fh)
 		return -ENOMEM;
-	}
+
+	lock_kernel();
+
 	file->private_data = fh;
 	fh->dev      = dev;
 	fh->radio    = radio;
@@ -809,6 +794,7 @@ static unsigned int video_poll(struct file *file,
 {
 	struct cx23885_fh *fh = file->private_data;
 	struct cx23885_buffer *buf;
+	unsigned int rc = POLLERR;
 
 	if (V4L2_BUF_TYPE_VBI_CAPTURE == fh->type) {
 		if (!res_get(fh->dev, fh, RESOURCE_VBI))
@@ -816,23 +802,28 @@ static unsigned int video_poll(struct file *file,
 		return videobuf_poll_stream(file, &fh->vbiq, wait);
 	}
 
+	mutex_lock(&fh->vidq.vb_lock);
 	if (res_check(fh, RESOURCE_VIDEO)) {
 		/* streaming capture */
 		if (list_empty(&fh->vidq.stream))
-			return POLLERR;
+			goto done;
 		buf = list_entry(fh->vidq.stream.next,
 			struct cx23885_buffer, vb.stream);
 	} else {
 		/* read() capture */
 		buf = (struct cx23885_buffer *)fh->vidq.read_buf;
 		if (NULL == buf)
-			return POLLERR;
+			goto done;
 	}
 	poll_wait(file, &buf->vb.done, wait);
 	if (buf->vb.state == VIDEOBUF_DONE ||
 	    buf->vb.state == VIDEOBUF_ERROR)
-		return POLLIN|POLLRDNORM;
-	return 0;
+		rc =  POLLIN|POLLRDNORM;
+	else
+		rc = 0;
+done:
+	mutex_unlock(&fh->vidq.vb_lock);
+	return rc;
 }
 
 static int video_release(struct file *file)
@@ -891,7 +882,7 @@ static int cx23885_get_control(struct cx23885_dev *dev,
 	struct v4l2_control *ctl)
 {
 	dprintk(1, "%s() calling cx25840(VIDIOC_G_CTRL)\n", __func__);
-	cx23885_call_i2c_clients(&dev->i2c_bus[2], VIDIOC_G_CTRL, ctl);
+	call_all(dev, core, g_ctrl, ctl);
 	return 0;
 }
 
@@ -970,15 +961,8 @@ static int vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 	}
 
 	f->fmt.pix.field = field;
-	if (f->fmt.pix.height < 32)
-		f->fmt.pix.height = 32;
-	if (f->fmt.pix.height > maxh)
-		f->fmt.pix.height = maxh;
-	if (f->fmt.pix.width < 48)
-		f->fmt.pix.width = 48;
-	if (f->fmt.pix.width > maxw)
-		f->fmt.pix.width = maxw;
-	f->fmt.pix.width &= ~0x03;
+	v4l_bound_align_image(&f->fmt.pix.width, 48, maxw, 2,
+			      &f->fmt.pix.height, 32, maxh, 0, 0);
 	f->fmt.pix.bytesperline =
 		(f->fmt.pix.width * fmt->depth) >> 3;
 	f->fmt.pix.sizeimage =
@@ -992,6 +976,7 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 {
 	struct cx23885_fh *fh = priv;
 	struct cx23885_dev *dev  = ((struct cx23885_fh *)priv)->dev;
+	struct v4l2_mbus_framefmt mbus_fmt;
 	int err;
 
 	dprintk(2, "%s()\n", __func__);
@@ -1005,7 +990,9 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 	fh->vidq.field = f->fmt.pix.field;
 	dprintk(2, "%s() width=%d height=%d field=%d\n", __func__,
 		fh->width, fh->height, fh->vidq.field);
-	cx23885_call_i2c_clients(&dev->i2c_bus[2], VIDIOC_S_FMT, f);
+	v4l2_fill_mbus_format(&mbus_fmt, &f->fmt.pix, V4L2_MBUS_FMT_FIXED);
+	call_all(dev, video, s_mbus_fmt, &mbus_fmt);
+	v4l2_fill_pix_format(&f->fmt.pix, &mbus_fmt);
 	return 0;
 }
 
@@ -1157,6 +1144,7 @@ static int cx23885_enum_input(struct cx23885_dev *dev, struct v4l2_input *i)
 		[CX23885_VMUX_COMPOSITE3] = "Composite3",
 		[CX23885_VMUX_COMPOSITE4] = "Composite4",
 		[CX23885_VMUX_SVIDEO]     = "S-Video",
+		[CX23885_VMUX_COMPONENT]  = "Component",
 		[CX23885_VMUX_TELEVISION] = "Television",
 		[CX23885_VMUX_CABLE]      = "Cable TV",
 		[CX23885_VMUX_DVB]        = "DVB",
@@ -1285,7 +1273,7 @@ static int vidioc_g_frequency(struct file *file, void *priv,
 	f->type = fh->radio ? V4L2_TUNER_RADIO : V4L2_TUNER_ANALOG_TV;
 	f->frequency = dev->freq;
 
-	cx23885_call_i2c_clients(&dev->i2c_bus[1], VIDIOC_G_FREQUENCY, f);
+	call_all(dev, tuner, g_frequency, f);
 
 	return 0;
 }
@@ -1300,7 +1288,7 @@ static int cx23885_set_freq(struct cx23885_dev *dev, struct v4l2_frequency *f)
 	mutex_lock(&dev->lock);
 	dev->freq = f->frequency;
 
-	cx23885_call_i2c_clients(&dev->i2c_bus[1], VIDIOC_S_FREQUENCY, f);
+	call_all(dev, tuner, s_frequency, f);
 
 	/* When changing channels it is required to reset TVAUDIO */
 	msleep(10);
@@ -1324,34 +1312,6 @@ static int vidioc_s_frequency(struct file *file, void *priv,
 	return
 		cx23885_set_freq(dev, f);
 }
-
-#ifdef CONFIG_VIDEO_ADV_DEBUG
-static int vidioc_g_register(struct file *file, void *fh,
-				struct v4l2_dbg_register *reg)
-{
-	struct cx23885_dev *dev = ((struct cx23885_fh *)fh)->dev;
-
-	if (!v4l2_chip_match_host(&reg->match))
-		return -EINVAL;
-
-	cx23885_call_i2c_clients(&dev->i2c_bus[2], VIDIOC_DBG_G_REGISTER, reg);
-
-	return 0;
-}
-
-static int vidioc_s_register(struct file *file, void *fh,
-				struct v4l2_dbg_register *reg)
-{
-	struct cx23885_dev *dev = ((struct cx23885_fh *)fh)->dev;
-
-	if (!v4l2_chip_match_host(&reg->match))
-		return -EINVAL;
-
-	cx23885_call_i2c_clients(&dev->i2c_bus[2], VIDIOC_DBG_S_REGISTER, reg);
-
-	return 0;
-}
-#endif
 
 /* ----------------------------------------------------------- */
 
@@ -1462,9 +1422,10 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
 	.vidioc_s_tuner       = vidioc_s_tuner,
 	.vidioc_g_frequency   = vidioc_g_frequency,
 	.vidioc_s_frequency   = vidioc_s_frequency,
+	.vidioc_g_chip_ident  = cx23885_g_chip_ident,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
-	.vidioc_g_register    = vidioc_g_register,
-	.vidioc_s_register    = vidioc_s_register,
+	.vidioc_g_register    = cx23885_g_register,
+	.vidioc_s_register    = cx23885_s_register,
 #endif
 };
 
@@ -1472,7 +1433,6 @@ static struct video_device cx23885_vbi_template;
 static struct video_device cx23885_video_template = {
 	.name                 = "cx23885-video",
 	.fops                 = &video_fops,
-	.minor                = -1,
 	.ioctl_ops 	      = &video_ioctl_ops,
 	.tvnorms              = CX23885_NORMS,
 	.current_norm         = V4L2_STD_NTSC_M,
@@ -1492,7 +1452,7 @@ void cx23885_video_unregister(struct cx23885_dev *dev)
 	cx_clear(PCI_INT_MSK, 1);
 
 	if (dev->video_dev) {
-		if (-1 != dev->video_dev->minor)
+		if (video_is_registered(dev->video_dev))
 			video_unregister_device(dev->video_dev);
 		else
 			video_device_release(dev->video_dev);
@@ -1528,6 +1488,42 @@ int cx23885_video_register(struct cx23885_dev *dev)
 	/* Don't enable VBI yet */
 	cx_set(PCI_INT_MSK, 1);
 
+	if (TUNER_ABSENT != dev->tuner_type) {
+		struct v4l2_subdev *sd = NULL;
+
+		if (dev->tuner_addr)
+			sd = v4l2_i2c_new_subdev(&dev->v4l2_dev,
+				&dev->i2c_bus[1].i2c_adap,
+				"tuner", "tuner", dev->tuner_addr, NULL);
+		else
+			sd = v4l2_i2c_new_subdev(&dev->v4l2_dev,
+				&dev->i2c_bus[1].i2c_adap,
+				"tuner", "tuner", 0, v4l2_i2c_tuner_addrs(ADDRS_TV));
+		if (sd) {
+			struct tuner_setup tun_setup;
+
+			memset(&tun_setup, 0, sizeof(tun_setup));
+			tun_setup.mode_mask = T_ANALOG_TV;
+			tun_setup.type = dev->tuner_type;
+			tun_setup.addr = v4l2_i2c_subdev_addr(sd);
+			tun_setup.tuner_callback = cx23885_tuner_callback;
+
+			v4l2_subdev_call(sd, tuner, s_type_addr, &tun_setup);
+
+			if (dev->board == CX23885_BOARD_LEADTEK_WINFAST_PXTV1200) {
+				struct xc2028_ctrl ctrl = {
+					.fname = XC2028_DEFAULT_FIRMWARE,
+					.max_len = 64
+				};
+				struct v4l2_priv_tun_config cfg = {
+					.tuner = dev->tuner_type,
+					.priv = &ctrl
+				};
+				v4l2_subdev_call(sd, tuner, s_config, &cfg);
+			}
+		}
+	}
+
 
 	/* register v4l devices */
 	dev->video_dev = cx23885_vdev_init(dev, dev->pci,
@@ -1539,8 +1535,8 @@ int cx23885_video_register(struct cx23885_dev *dev)
 			dev->name);
 		goto fail_unreg;
 	}
-	printk(KERN_INFO "%s/0: registered device video%d [v4l2]\n",
-	       dev->name, dev->video_dev->num);
+	printk(KERN_INFO "%s/0: registered device %s [v4l2]\n",
+	       dev->name, video_device_node_name(dev->video_dev));
 	/* initial device configuration */
 	mutex_lock(&dev->lock);
 	cx23885_set_tvnorm(dev, dev->tvnorm);

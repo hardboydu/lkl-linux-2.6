@@ -35,6 +35,7 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
@@ -80,17 +81,17 @@ static int omap24xxcam_clock_get(struct omap24xxcam_device *cam)
 {
 	int rval = 0;
 
-	cam->fck = clk_get(cam->dev, "cam_fck");
+	cam->fck = clk_get(cam->dev, "fck");
 	if (IS_ERR(cam->fck)) {
-		dev_err(cam->dev, "can't get cam_fck");
+		dev_err(cam->dev, "can't get camera fck");
 		rval = PTR_ERR(cam->fck);
 		omap24xxcam_clock_put(cam);
 		return rval;
 	}
 
-	cam->ick = clk_get(cam->dev, "cam_ick");
+	cam->ick = clk_get(cam->dev, "ick");
 	if (IS_ERR(cam->ick)) {
-		dev_err(cam->dev, "can't get cam_ick");
+		dev_err(cam->dev, "can't get camera ick");
 		rval = PTR_ERR(cam->ick);
 		omap24xxcam_clock_put(cam);
 	}
@@ -451,8 +452,8 @@ static int omap24xxcam_vbq_setup(struct videobuf_queue *vbq, unsigned int *cnt,
 	*size = fh->pix.sizeimage;
 
 	/* accessing fh->cam->capture_mem is ok, it's constant */
-	while (*size * *cnt > fh->cam->capture_mem)
-		(*cnt)--;
+	if (*size * *cnt > fh->cam->capture_mem)
+		*cnt = fh->cam->capture_mem / *size;
 
 	return 0;
 }
@@ -1285,9 +1286,6 @@ static int vidioc_g_parm(struct file *file, void *fh,
 	struct omap24xxcam_device *cam = ofh->cam;
 	int rval;
 
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	mutex_lock(&cam->mutex);
 	rval = vidioc_int_g_parm(cam->sdev, a);
 	mutex_unlock(&cam->mutex);
@@ -1302,9 +1300,6 @@ static int vidioc_s_parm(struct file *file, void *fh,
 	struct omap24xxcam_device *cam = ofh->cam;
 	struct v4l2_streamparm old_streamparm;
 	int rval;
-
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
 
 	mutex_lock(&cam->mutex);
 	if (cam->streaming) {
@@ -1410,7 +1405,7 @@ static int omap24xxcam_mmap_buffers(struct file *file,
 	}
 
 	size = 0;
-	for (i = first; i <= last; i++) {
+	for (i = first; i <= last && i < VIDEO_MAX_FRAME; i++) {
 		struct videobuf_dmabuf *dma = videobuf_to_dma(vbq->bufs[i]);
 
 		for (j = 0; j < dma->sglen; j++) {
@@ -1456,12 +1451,11 @@ static int omap24xxcam_mmap(struct file *file, struct vm_area_struct *vma)
 
 static int omap24xxcam_open(struct file *file)
 {
-	int minor = video_devdata(file)->minor;
 	struct omap24xxcam_device *cam = omap24xxcam.priv;
 	struct omap24xxcam_fh *fh;
 	struct v4l2_format format;
 
-	if (!cam || !cam->vfd || (cam->vfd->minor != minor))
+	if (!cam || !cam->vfd)
 		return -ENODEV;
 
 	fh = kzalloc(sizeof(*fh), GFP_KERNEL);
@@ -1665,9 +1659,7 @@ static int omap24xxcam_device_register(struct v4l2_int_device *s)
 	vfd->parent = cam->dev;
 
 	strlcpy(vfd->name, CAM_NAME, sizeof(vfd->name));
-	vfd->vfl_type		 = VID_TYPE_CAPTURE | VID_TYPE_CHROMAKEY;
 	vfd->fops		 = &omap24xxcam_fops;
-	vfd->minor		 = -1;
 	vfd->ioctl_ops		 = &omap24xxcam_ioctl_fops;
 
 	omap24xxcam_hwinit(cam);
@@ -1678,14 +1670,14 @@ static int omap24xxcam_device_register(struct v4l2_int_device *s)
 
 	if (video_register_device(vfd, VFL_TYPE_GRABBER, video_nr) < 0) {
 		dev_err(cam->dev, "could not register V4L device\n");
-		vfd->minor = -1;
 		rval = -EBUSY;
 		goto err;
 	}
 
 	omap24xxcam_poweron_reset(cam);
 
-	dev_info(cam->dev, "registered device video%d\n", vfd->minor);
+	dev_info(cam->dev, "registered device %s\n",
+		 video_device_node_name(vfd));
 
 	return 0;
 
@@ -1702,7 +1694,7 @@ static void omap24xxcam_device_unregister(struct v4l2_int_device *s)
 	omap24xxcam_sensor_exit(cam);
 
 	if (cam->vfd) {
-		if (cam->vfd->minor == -1) {
+		if (!video_is_registered(cam->vfd)) {
 			/*
 			 * The device was never registered, so release the
 			 * video_device struct directly.
@@ -1744,7 +1736,7 @@ static struct v4l2_int_device omap24xxcam = {
  *
  */
 
-static int __init omap24xxcam_probe(struct platform_device *pdev)
+static int __devinit omap24xxcam_probe(struct platform_device *pdev)
 {
 	struct omap24xxcam_device *cam;
 	struct resource *mem;

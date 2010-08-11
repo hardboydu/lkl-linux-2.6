@@ -21,7 +21,6 @@
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/videodev2.h>
@@ -137,10 +136,10 @@ static int __init pvr_init(void)
 	ret = usb_register(&pvr_driver);
 
 	if (ret == 0)
-		printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+		printk(KERN_INFO "pvrusb2: " DRIVER_VERSION ":"
 		       DRIVER_DESC "\n");
 	if (pvrusb2_debug)
-		printk(KERN_INFO KBUILD_MODNAME ": Debug mask is %d (0x%x)\n",
+		printk(KERN_INFO "pvrusb2: Debug mask is %d (0x%x)\n",
 		       pvrusb2_debug,pvrusb2_debug);
 
 	pvr2_trace(PVR2_TRACE_INIT,"pvr_init complete");
@@ -154,11 +153,11 @@ static void __exit pvr_exit(void)
 
 	usb_deregister(&pvr_driver);
 
+	pvr2_context_global_done();
+
 #ifdef CONFIG_VIDEO_PVRUSB2_SYSFS
 	pvr2_sysfs_class_destroy(class_ptr);
 #endif /* CONFIG_VIDEO_PVRUSB2_SYSFS */
-
-	pvr2_context_global_done();
 
 	pvr2_trace(PVR2_TRACE_INIT,"pvr_exit complete");
 }

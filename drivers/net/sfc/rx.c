@@ -1,7 +1,7 @@
 /****************************************************************************
  * Driver for Solarflare Solarstorm network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2008 Solarflare Communications Inc.
+ * Copyright 2005-2009 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -10,15 +10,15 @@
 
 #include <linux/socket.h>
 #include <linux/in.h>
+#include <linux/slab.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <net/ip.h>
 #include <net/checksum.h>
 #include "net_driver.h"
-#include "rx.h"
 #include "efx.h"
-#include "falcon.h"
+#include "nic.h"
 #include "selftest.h"
 #include "workarounds.h"
 
@@ -61,7 +61,7 @@
  *   rx_alloc_method = (rx_alloc_level > RX_ALLOC_LEVEL_LRO ?
  *                      RX_ALLOC_METHOD_PAGE : RX_ALLOC_METHOD_SKB)
  */
-static int rx_alloc_method = RX_ALLOC_METHOD_PAGE;
+static int rx_alloc_method = RX_ALLOC_METHOD_AUTO;
 
 #define RX_ALLOC_LEVEL_LRO 0x2000
 #define RX_ALLOC_LEVEL_MAX 0x3000
@@ -98,109 +98,6 @@ static inline unsigned int efx_rx_buf_size(struct efx_nic *efx)
 	return PAGE_SIZE << efx->rx_buffer_order;
 }
 
-
-/**************************************************************************
- *
- * Linux generic LRO handling
- *
- **************************************************************************
- */
-
-static int efx_lro_get_skb_hdr(struct sk_buff *skb, void **ip_hdr,
-			       void **tcpudp_hdr, u64 *hdr_flags, void *priv)
-{
-	struct efx_channel *channel = priv;
-	struct iphdr *iph;
-	struct tcphdr *th;
-
-	iph = (struct iphdr *)skb->data;
-	if (skb->protocol != htons(ETH_P_IP) || iph->protocol != IPPROTO_TCP)
-		goto fail;
-
-	th = (struct tcphdr *)(skb->data + iph->ihl * 4);
-
-	*tcpudp_hdr = th;
-	*ip_hdr = iph;
-	*hdr_flags = LRO_IPV4 | LRO_TCP;
-
-	channel->rx_alloc_level += RX_ALLOC_FACTOR_LRO;
-	return 0;
-fail:
-	channel->rx_alloc_level += RX_ALLOC_FACTOR_SKB;
-	return -1;
-}
-
-static int efx_get_frag_hdr(struct skb_frag_struct *frag, void **mac_hdr,
-			    void **ip_hdr, void **tcpudp_hdr, u64 *hdr_flags,
-			    void *priv)
-{
-	struct efx_channel *channel = priv;
-	struct ethhdr *eh;
-	struct iphdr *iph;
-
-	/* We support EtherII and VLAN encapsulated IPv4 */
-	eh = page_address(frag->page) + frag->page_offset;
-	*mac_hdr = eh;
-
-	if (eh->h_proto == htons(ETH_P_IP)) {
-		iph = (struct iphdr *)(eh + 1);
-	} else {
-		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)eh;
-		if (veh->h_vlan_encapsulated_proto != htons(ETH_P_IP))
-			goto fail;
-
-		iph = (struct iphdr *)(veh + 1);
-	}
-	*ip_hdr = iph;
-
-	/* We can only do LRO over TCP */
-	if (iph->protocol != IPPROTO_TCP)
-		goto fail;
-
-	*hdr_flags = LRO_IPV4 | LRO_TCP;
-	*tcpudp_hdr = (struct tcphdr *)((u8 *) iph + iph->ihl * 4);
-
-	channel->rx_alloc_level += RX_ALLOC_FACTOR_LRO;
-	return 0;
- fail:
-	channel->rx_alloc_level += RX_ALLOC_FACTOR_SKB;
-	return -1;
-}
-
-int efx_lro_init(struct net_lro_mgr *lro_mgr, struct efx_nic *efx)
-{
-	size_t s = sizeof(struct net_lro_desc) * EFX_MAX_LRO_DESCRIPTORS;
-	struct net_lro_desc *lro_arr;
-
-	/* Allocate the LRO descriptors structure */
-	lro_arr = kzalloc(s, GFP_KERNEL);
-	if (lro_arr == NULL)
-		return -ENOMEM;
-
-	lro_mgr->lro_arr = lro_arr;
-	lro_mgr->max_desc = EFX_MAX_LRO_DESCRIPTORS;
-	lro_mgr->max_aggr = EFX_MAX_LRO_AGGR;
-	lro_mgr->frag_align_pad = EFX_PAGE_SKB_ALIGN;
-
-	lro_mgr->get_skb_header = efx_lro_get_skb_hdr;
-	lro_mgr->get_frag_header = efx_get_frag_hdr;
-	lro_mgr->dev = efx->net_dev;
-
-	lro_mgr->features = LRO_F_NAPI;
-
-	/* We can pass packets up with the checksum intact */
-	lro_mgr->ip_summed = CHECKSUM_UNNECESSARY;
-
-	lro_mgr->ip_summed_aggr = CHECKSUM_UNNECESSARY;
-
-	return 0;
-}
-
-void efx_lro_fini(struct net_lro_mgr *lro_mgr)
-{
-	kfree(lro_mgr->lro_arr);
-	lro_mgr->lro_arr = NULL;
-}
 
 /**
  * efx_init_rx_buffer_skb - create new RX buffer using skb-based allocation
@@ -396,8 +293,7 @@ static int __efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue,
 	 * fill anyway.
 	 */
 	fill_level = (rx_queue->added_count - rx_queue->removed_count);
-	EFX_BUG_ON_PARANOID(fill_level >
-			    rx_queue->efx->type->rxd_ring_mask + 1);
+	EFX_BUG_ON_PARANOID(fill_level > EFX_RXQ_SIZE);
 
 	/* Don't fill if we don't need to */
 	if (fill_level >= rx_queue->fast_fill_trigger)
@@ -419,8 +315,7 @@ static int __efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue,
  retry:
 	/* Recalculate current fill level now that we have the lock */
 	fill_level = (rx_queue->added_count - rx_queue->removed_count);
-	EFX_BUG_ON_PARANOID(fill_level >
-			    rx_queue->efx->type->rxd_ring_mask + 1);
+	EFX_BUG_ON_PARANOID(fill_level > EFX_RXQ_SIZE);
 	space = rx_queue->fast_fill_limit - fill_level;
 	if (space < EFX_RX_BATCH)
 		goto out_unlock;
@@ -432,8 +327,7 @@ static int __efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue,
 
 	do {
 		for (i = 0; i < EFX_RX_BATCH; ++i) {
-			index = (rx_queue->added_count &
-				 rx_queue->efx->type->rxd_ring_mask);
+			index = rx_queue->added_count & EFX_RXQ_MASK;
 			rx_buf = efx_rx_buffer(rx_queue, index);
 			rc = efx_init_rx_buffer(rx_queue, rx_buf);
 			if (unlikely(rc))
@@ -448,7 +342,7 @@ static int __efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue,
 
  out:
 	/* Send write pointer to card. */
-	falcon_notify_rx_desc(rx_queue);
+	efx_nic_notify_rx_desc(rx_queue);
 
 	/* If the fast fill is running inside from the refill tasklet, then
 	 * for SMP systems it may be running on a different CPU to
@@ -547,77 +441,57 @@ static void efx_rx_packet__check_len(struct efx_rx_queue *rx_queue,
  * the appropriate LRO method
  */
 static void efx_rx_packet_lro(struct efx_channel *channel,
-			      struct efx_rx_buffer *rx_buf)
+			      struct efx_rx_buffer *rx_buf,
+			      bool checksummed)
 {
-	struct net_lro_mgr *lro_mgr = &channel->lro_mgr;
-	void *priv = channel;
+	struct napi_struct *napi = &channel->napi_str;
+	gro_result_t gro_result;
 
 	/* Pass the skb/page into the LRO engine */
 	if (rx_buf->page) {
-		struct skb_frag_struct frags;
-
-		frags.page = rx_buf->page;
-		frags.page_offset = efx_rx_buf_offset(rx_buf);
-		frags.size = rx_buf->len;
-
-		lro_receive_frags(lro_mgr, &frags, rx_buf->len,
-				  rx_buf->len, priv, 0);
+		struct page *page = rx_buf->page;
+		struct sk_buff *skb;
 
 		EFX_BUG_ON_PARANOID(rx_buf->skb);
 		rx_buf->page = NULL;
-	} else {
-		EFX_BUG_ON_PARANOID(!rx_buf->skb);
 
-		lro_receive_skb(lro_mgr, rx_buf->skb, priv);
-		rx_buf->skb = NULL;
-	}
-}
+		skb = napi_get_frags(napi);
+		if (!skb) {
+			put_page(page);
+			return;
+		}
 
-/* Allocate and construct an SKB around a struct page.*/
-static struct sk_buff *efx_rx_mk_skb(struct efx_rx_buffer *rx_buf,
-				     struct efx_nic *efx,
-				     int hdr_len)
-{
-	struct sk_buff *skb;
-
-	/* Allocate an SKB to store the headers */
-	skb = netdev_alloc_skb(efx->net_dev, hdr_len + EFX_PAGE_SKB_ALIGN);
-	if (unlikely(skb == NULL)) {
-		EFX_ERR_RL(efx, "RX out of memory for skb\n");
-		return NULL;
-	}
-
-	EFX_BUG_ON_PARANOID(skb_shinfo(skb)->nr_frags);
-	EFX_BUG_ON_PARANOID(rx_buf->len < hdr_len);
-
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-	skb_reserve(skb, EFX_PAGE_SKB_ALIGN);
-
-	skb->len = rx_buf->len;
-	skb->truesize = rx_buf->len + sizeof(struct sk_buff);
-	memcpy(skb->data, rx_buf->data, hdr_len);
-	skb->tail += hdr_len;
-
-	/* Append the remaining page onto the frag list */
-	if (unlikely(rx_buf->len > hdr_len)) {
-		struct skb_frag_struct *frag = skb_shinfo(skb)->frags;
-		frag->page = rx_buf->page;
-		frag->page_offset = efx_rx_buf_offset(rx_buf) + hdr_len;
-		frag->size = skb->len - hdr_len;
+		skb_shinfo(skb)->frags[0].page = page;
+		skb_shinfo(skb)->frags[0].page_offset =
+			efx_rx_buf_offset(rx_buf);
+		skb_shinfo(skb)->frags[0].size = rx_buf->len;
 		skb_shinfo(skb)->nr_frags = 1;
-		skb->data_len = frag->size;
+
+		skb->len = rx_buf->len;
+		skb->data_len = rx_buf->len;
+		skb->truesize += rx_buf->len;
+		skb->ip_summed =
+			checksummed ? CHECKSUM_UNNECESSARY : CHECKSUM_NONE;
+
+		skb_record_rx_queue(skb, channel->channel);
+
+		gro_result = napi_gro_frags(napi);
 	} else {
-		__free_pages(rx_buf->page, efx->rx_buffer_order);
-		skb->data_len = 0;
+		struct sk_buff *skb = rx_buf->skb;
+
+		EFX_BUG_ON_PARANOID(!skb);
+		EFX_BUG_ON_PARANOID(!checksummed);
+		rx_buf->skb = NULL;
+
+		gro_result = napi_gro_receive(napi, skb);
 	}
 
-	/* Ownership has transferred from the rx_buf to skb */
-	rx_buf->page = NULL;
-
-	/* Move past the ethernet header */
-	skb->protocol = eth_type_trans(skb, efx->net_dev);
-
-	return skb;
+	if (gro_result == GRO_NORMAL) {
+		channel->rx_alloc_level += RX_ALLOC_FACTOR_SKB;
+	} else if (gro_result != GRO_DROP) {
+		channel->rx_alloc_level += RX_ALLOC_FACTOR_LRO;
+		channel->irq_mod_score += 2;
+	}
 }
 
 void efx_rx_packet(struct efx_rx_queue *rx_queue, unsigned int index,
@@ -687,7 +561,6 @@ void __efx_rx_packet(struct efx_channel *channel,
 {
 	struct efx_nic *efx = channel->efx;
 	struct sk_buff *skb;
-	bool lro = !!(efx->net_dev->features & NETIF_F_LRO);
 
 	/* If we're in loopback test, then pass the packet directly to the
 	 * loopback layer, and free the rx_buf here
@@ -695,7 +568,7 @@ void __efx_rx_packet(struct efx_channel *channel,
 	if (unlikely(efx->loopback_selftest)) {
 		efx_loopback_rx_packet(efx, rx_buf->data, rx_buf->len);
 		efx_free_rx_buffer(efx, rx_buf);
-		goto done;
+		return;
 	}
 
 	if (rx_buf->skb) {
@@ -707,52 +580,28 @@ void __efx_rx_packet(struct efx_channel *channel,
 		 * at the ethernet header */
 		rx_buf->skb->protocol = eth_type_trans(rx_buf->skb,
 						       efx->net_dev);
+
+		skb_record_rx_queue(rx_buf->skb, channel->channel);
 	}
 
-	/* Both our generic-LRO and SFC-SSR support skb and page based
-	 * allocation, but neither support switching from one to the
-	 * other on the fly. If we spot that the allocation mode has
-	 * changed, then flush the LRO state.
-	 */
-	if (unlikely(channel->rx_alloc_pop_pages != (rx_buf->page != NULL))) {
-		efx_flush_lro(channel);
-		channel->rx_alloc_pop_pages = (rx_buf->page != NULL);
-	}
-	if (likely(checksummed && lro)) {
-		efx_rx_packet_lro(channel, rx_buf);
-		goto done;
+	if (likely(checksummed || rx_buf->page)) {
+		efx_rx_packet_lro(channel, rx_buf, checksummed);
+		return;
 	}
 
-	/* Form an skb if required */
-	if (rx_buf->page) {
-		int hdr_len = min(rx_buf->len, EFX_SKB_HEADERS);
-		skb = efx_rx_mk_skb(rx_buf, efx, hdr_len);
-		if (unlikely(skb == NULL)) {
-			efx_free_rx_buffer(efx, rx_buf);
-			goto done;
-		}
-	} else {
-		/* We now own the SKB */
-		skb = rx_buf->skb;
-		rx_buf->skb = NULL;
-	}
-
-	EFX_BUG_ON_PARANOID(rx_buf->page);
-	EFX_BUG_ON_PARANOID(rx_buf->skb);
+	/* We now own the SKB */
+	skb = rx_buf->skb;
+	rx_buf->skb = NULL;
 	EFX_BUG_ON_PARANOID(!skb);
 
 	/* Set the SKB flags */
-	if (unlikely(!checksummed || !efx->rx_checksum_enabled))
-		skb->ip_summed = CHECKSUM_NONE;
+	skb->ip_summed = CHECKSUM_NONE;
 
 	/* Pass the packet up */
 	netif_receive_skb(skb);
 
 	/* Update allocation strategy method */
 	channel->rx_alloc_level += RX_ALLOC_FACTOR_SKB;
-
-done:
-	;
 }
 
 void efx_rx_strategy(struct efx_channel *channel)
@@ -760,7 +609,7 @@ void efx_rx_strategy(struct efx_channel *channel)
 	enum efx_rx_alloc_method method = rx_alloc_method;
 
 	/* Only makes sense to use page based allocation if LRO is enabled */
-	if (!(channel->efx->net_dev->features & NETIF_F_LRO)) {
+	if (!(channel->efx->net_dev->features & NETIF_F_GRO)) {
 		method = RX_ALLOC_METHOD_SKB;
 	} else if (method == RX_ALLOC_METHOD_AUTO) {
 		/* Constrain the rx_alloc_level */
@@ -787,12 +636,12 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 	EFX_LOG(efx, "creating RX queue %d\n", rx_queue->queue);
 
 	/* Allocate RX buffers */
-	rxq_size = (efx->type->rxd_ring_mask + 1) * sizeof(*rx_queue->buffer);
+	rxq_size = EFX_RXQ_SIZE * sizeof(*rx_queue->buffer);
 	rx_queue->buffer = kzalloc(rxq_size, GFP_KERNEL);
 	if (!rx_queue->buffer)
 		return -ENOMEM;
 
-	rc = falcon_probe_rx(rx_queue);
+	rc = efx_nic_probe_rx(rx_queue);
 	if (rc) {
 		kfree(rx_queue->buffer);
 		rx_queue->buffer = NULL;
@@ -802,7 +651,6 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 
 void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 {
-	struct efx_nic *efx = rx_queue->efx;
 	unsigned int max_fill, trigger, limit;
 
 	EFX_LOG(rx_queue->efx, "initialising RX queue %d\n", rx_queue->queue);
@@ -815,7 +663,7 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->min_overfill = -1U;
 
 	/* Initialise limit fields */
-	max_fill = efx->type->rxd_ring_mask + 1 - EFX_RXD_HEAD_ROOM;
+	max_fill = EFX_RXQ_SIZE - EFX_RXD_HEAD_ROOM;
 	trigger = max_fill * min(rx_refill_threshold, 100U) / 100U;
 	limit = max_fill * min(rx_refill_limit, 100U) / 100U;
 
@@ -824,7 +672,7 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->fast_fill_limit = limit;
 
 	/* Set up RX descriptor ring */
-	falcon_init_rx(rx_queue);
+	efx_nic_init_rx(rx_queue);
 }
 
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
@@ -834,11 +682,11 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 
 	EFX_LOG(rx_queue->efx, "shutting down RX queue %d\n", rx_queue->queue);
 
-	falcon_fini_rx(rx_queue);
+	efx_nic_fini_rx(rx_queue);
 
 	/* Release RX buffers NB start at index 0 not current HW ptr */
 	if (rx_queue->buffer) {
-		for (i = 0; i <= rx_queue->efx->type->rxd_ring_mask; i++) {
+		for (i = 0; i <= EFX_RXQ_MASK; i++) {
 			rx_buf = efx_rx_buffer(rx_queue, i);
 			efx_fini_rx_buffer(rx_queue, rx_buf);
 		}
@@ -859,15 +707,10 @@ void efx_remove_rx_queue(struct efx_rx_queue *rx_queue)
 {
 	EFX_LOG(rx_queue->efx, "destroying RX queue %d\n", rx_queue->queue);
 
-	falcon_remove_rx(rx_queue);
+	efx_nic_remove_rx(rx_queue);
 
 	kfree(rx_queue->buffer);
 	rx_queue->buffer = NULL;
-}
-
-void efx_flush_lro(struct efx_channel *channel)
-{
-	lro_flush_all(&channel->lro_mgr);
 }
 
 

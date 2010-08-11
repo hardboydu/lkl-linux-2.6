@@ -25,6 +25,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 #include <net/ipv6.h>
@@ -36,7 +37,6 @@
 
 #define IPQ_QMAX_DEFAULT 1024
 #define IPQ_PROC_FS_NAME "ip6_queue"
-#define NET_IPQ_QMAX 2088
 #define NET_IPQ_QMAX_NAME "ip6_queue_maxlen"
 
 typedef int (*ipq_cmpfn)(struct nf_queue_entry *, unsigned long);
@@ -162,8 +162,7 @@ ipq_build_packet_message(struct nf_queue_entry *entry, int *errp)
 		break;
 
 	case IPQ_COPY_PACKET:
-		if ((entry->skb->ip_summed == CHECKSUM_PARTIAL ||
-		     entry->skb->ip_summed == CHECKSUM_COMPLETE) &&
+		if (entry->skb->ip_summed == CHECKSUM_PARTIAL &&
 		    (*errp = skb_checksum_help(entry->skb))) {
 			read_unlock_bh(&queue_lock);
 			return NULL;
@@ -463,7 +462,6 @@ __ipq_rcv_skb(struct sk_buff *skb)
 
 	if (flags & NLM_F_ACK)
 		netlink_ack(skb, nlh, 0);
-	return;
 }
 
 static void
@@ -499,10 +497,9 @@ ipq_rcv_nl_event(struct notifier_block *this,
 {
 	struct netlink_notify *n = ptr;
 
-	if (event == NETLINK_URELEASE &&
-	    n->protocol == NETLINK_IP6_FW && n->pid) {
+	if (event == NETLINK_URELEASE && n->protocol == NETLINK_IP6_FW) {
 		write_lock_bh(&queue_lock);
-		if ((n->net == &init_net) && (n->pid == peer_pid))
+		if ((net_eq(n->net, &init_net)) && (n->pid == peer_pid))
 			__ipq_reset();
 		write_unlock_bh(&queue_lock);
 	}
@@ -518,14 +515,13 @@ static struct ctl_table_header *ipq_sysctl_header;
 
 static ctl_table ipq_table[] = {
 	{
-		.ctl_name	= NET_IPQ_QMAX,
 		.procname	= NET_IPQ_QMAX_NAME,
 		.data		= &queue_maxlen,
 		.maxlen		= sizeof(queue_maxlen),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
 	},
-	{ .ctl_name = 0 }
+	{ }
 };
 #endif
 
@@ -598,7 +594,7 @@ static int __init ip6_queue_init(void)
 #ifdef CONFIG_SYSCTL
 	ipq_sysctl_header = register_sysctl_paths(net_ipv6_ctl_path, ipq_table);
 #endif
-	status = nf_register_queue_handler(PF_INET6, &nfqh);
+	status = nf_register_queue_handler(NFPROTO_IPV6, &nfqh);
 	if (status < 0) {
 		printk(KERN_ERR "ip6_queue: failed to register queue handler\n");
 		goto cleanup_sysctl;
@@ -625,7 +621,7 @@ cleanup_netlink_notifier:
 static void __exit ip6_queue_fini(void)
 {
 	nf_unregister_queue_handlers(&nfqh);
-	synchronize_net();
+
 	ipq_flush(NULL, 0);
 
 #ifdef CONFIG_SYSCTL
@@ -643,6 +639,7 @@ static void __exit ip6_queue_fini(void)
 
 MODULE_DESCRIPTION("IPv6 packet queue handler");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NET_PF_PROTO(PF_NETLINK, NETLINK_IP6_FW);
 
 module_init(ip6_queue_init);
 module_exit(ip6_queue_fini);

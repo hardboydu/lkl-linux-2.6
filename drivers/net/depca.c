@@ -237,6 +237,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
@@ -516,7 +517,8 @@ struct depca_private {
 ** Public Functions
 */
 static int depca_open(struct net_device *dev);
-static int depca_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t depca_start_xmit(struct sk_buff *skb,
+				    struct net_device *dev);
 static irqreturn_t depca_interrupt(int irq, void *dev_id);
 static int depca_close(struct net_device *dev);
 static int depca_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
@@ -566,6 +568,18 @@ MODULE_LICENSE("GPL");
     outw(CSR0, DEPCA_ADDR);\
     outw(STOP, DEPCA_DATA)
 
+static const struct net_device_ops depca_netdev_ops = {
+	.ndo_open 		= depca_open,
+	.ndo_start_xmit 	= depca_start_xmit,
+	.ndo_stop 		= depca_close,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_do_ioctl 		= depca_ioctl,
+	.ndo_tx_timeout 	= depca_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __init depca_hw_init (struct net_device *dev, struct device *device)
 {
 	struct depca_private *lp;
@@ -606,8 +620,8 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 	if (!mem_start || lp->adapter < DEPCA || lp->adapter >=unknown)
 		return -ENXIO;
 
-	printk ("%s: %s at 0x%04lx",
-	        device->bus_id, depca_signature[lp->adapter], ioaddr);
+	printk("%s: %s at 0x%04lx",
+	       dev_name(device), depca_signature[lp->adapter], ioaddr);
 
 	switch (lp->depca_bus) {
 #ifdef CONFIG_MCA
@@ -669,7 +683,7 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 
 	spin_lock_init(&lp->lock);
 	sprintf(lp->adapter_name, "%s (%s)",
-		depca_signature[lp->adapter], device->bus_id);
+		depca_signature[lp->adapter], dev_name(device));
 	status = -EBUSY;
 
 	/* Initialisation Block */
@@ -793,17 +807,12 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 	}
 
 	/* The DEPCA-specific entries in the device structure. */
-	dev->open = &depca_open;
-	dev->hard_start_xmit = &depca_start_xmit;
-	dev->stop = &depca_close;
-	dev->set_multicast_list = &set_multicast_list;
-	dev->do_ioctl = &depca_ioctl;
-	dev->tx_timeout = depca_tx_timeout;
+	dev->netdev_ops = &depca_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
 	dev->mem_start = 0;
 
-	device->driver_data = dev;
+	dev_set_drvdata(device, dev);
 	SET_NETDEV_DEV (dev, device);
 
 	status = register_netdev(dev);
@@ -840,7 +849,7 @@ static int depca_open(struct net_device *dev)
 
 	depca_dbg_open(dev);
 
-	if (request_irq(dev->irq, &depca_interrupt, 0, lp->adapter_name, dev)) {
+	if (request_irq(dev->irq, depca_interrupt, 0, lp->adapter_name, dev)) {
 		printk("depca_open(): Requested IRQ%d is busy\n", dev->irq);
 		status = -EAGAIN;
 	} else {
@@ -912,7 +921,7 @@ static void depca_tx_timeout(struct net_device *dev)
 	STOP_DEPCA;
 	depca_init_ring(dev);
 	LoadCSRs(dev);
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	netif_wake_queue(dev);
 	InitRestartDepca(dev);
 }
@@ -921,7 +930,8 @@ static void depca_tx_timeout(struct net_device *dev)
 /*
 ** Writes a socket buffer to TX descriptor ring and starts transmission
 */
-static int depca_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t depca_start_xmit(struct sk_buff *skb,
+				    struct net_device *dev)
 {
 	struct depca_private *lp = netdev_priv(dev);
 	u_long ioaddr = dev->base_addr;
@@ -944,13 +954,12 @@ static int depca_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			outw(CSR0, DEPCA_ADDR);
 			outw(INEA | TDMD, DEPCA_DATA);
 
-			dev->trans_start = jiffies;
 			dev_kfree_skb(skb);
 		}
 		if (TX_BUFFS_AVAIL)
 			netif_start_queue(dev);
 	} else
-		status = -1;
+		status = NETDEV_TX_LOCKED;
 
       out:
 	return status;
@@ -1194,8 +1203,6 @@ static void LoadCSRs(struct net_device *dev)
 	outw(ACON, DEPCA_DATA);
 
 	outw(CSR0, DEPCA_ADDR);	/* Point back to CSR0 */
-
-	return;
 }
 
 static int InitRestartDepca(struct net_device *dev)
@@ -1262,7 +1269,7 @@ static void set_multicast_list(struct net_device *dev)
 static void SetMulticastFilter(struct net_device *dev)
 {
 	struct depca_private *lp = netdev_priv(dev);
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct netdev_hw_addr *ha;
 	char *addrs;
 	int i, j, bit, byte;
 	u16 hashcode;
@@ -1277,9 +1284,8 @@ static void SetMulticastFilter(struct net_device *dev)
 			lp->init_block.mcast_table[i] = 0;
 		}
 		/* Add multicast addresses */
-		for (i = 0; i < dev->mc_count; i++) {	/* for each address in the list */
-			addrs = dmi->dmi_addr;
-			dmi = dmi->next;
+		netdev_for_each_mc_addr(ha, dev) {
+			addrs = ha->addr;
 			if ((*addrs & 0x01) == 1) {	/* multicast address? */
 				crc = ether_crc(ETH_ALEN, addrs);
 				hashcode = (crc & 1);	/* hashcode is 6 LSb of CRC ... */
@@ -1294,8 +1300,6 @@ static void SetMulticastFilter(struct net_device *dev)
 			}
 		}
 	}
-
-	return;
 }
 
 static int __init depca_common_init (u_long ioaddr, struct net_device **devp)
@@ -1607,7 +1611,7 @@ static int __devexit depca_device_remove (struct device *device)
 	struct depca_private *lp;
 	int bus;
 
-	dev  = device->driver_data;
+	dev  = dev_get_drvdata(device);
 	lp   = netdev_priv(dev);
 
 	unregister_netdev (dev);
@@ -1786,7 +1790,7 @@ static int __init get_hw_addr(struct net_device *dev)
 static int load_packet(struct net_device *dev, struct sk_buff *skb)
 {
 	struct depca_private *lp = netdev_priv(dev);
-	int i, entry, end, len, status = 0;
+	int i, entry, end, len, status = NETDEV_TX_OK;
 
 	entry = lp->tx_new;	/* Ring around buffer number. */
 	end = (entry + (skb->len - 1) / TX_BUFF_SZ) & lp->txRingMask;
@@ -1832,7 +1836,7 @@ static int load_packet(struct net_device *dev, struct sk_buff *skb)
 
 		lp->tx_new = (++end) & lp->txRingMask;	/* update current pointers */
 	} else {
-		status = -1;
+		status = NETDEV_TX_LOCKED;
 	}
 
 	return status;
@@ -1900,8 +1904,6 @@ static void depca_dbg_open(struct net_device *dev)
 		outw(CSR3, DEPCA_ADDR);
 		printk("CSR3: 0x%4.4x\n", inw(DEPCA_DATA));
 	}
-
-	return;
 }
 
 /*

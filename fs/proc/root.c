@@ -67,8 +67,7 @@ static int proc_get_sb(struct file_system_type *fs_type,
 		sb->s_flags = flags;
 		err = proc_fill_super(sb);
 		if (err) {
-			up_write(&sb->s_umount);
-			deactivate_super(sb);
+			deactivate_locked_super(sb);
 			return err;
 		}
 
@@ -83,7 +82,8 @@ static int proc_get_sb(struct file_system_type *fs_type,
 		ns->proc_mnt = mnt;
 	}
 
-	return simple_set_mnt(mnt, sb);
+	simple_set_mnt(mnt, sb);
+	return 0;
 }
 
 static void proc_kill_sb(struct super_block *sb)
@@ -110,7 +110,6 @@ void __init proc_root_init(void)
 	if (err)
 		return;
 	proc_mnt = kern_mount_data(&proc_fs_type, &init_pid_ns);
-	err = PTR_ERR(proc_mnt);
 	if (IS_ERR(proc_mnt)) {
 		unregister_filesystem(&proc_fs_type);
 		return;
@@ -220,9 +219,3 @@ void pid_ns_release_proc(struct pid_namespace *ns)
 {
 	mntput(ns->proc_mnt);
 }
-
-EXPORT_SYMBOL(proc_symlink);
-EXPORT_SYMBOL(proc_mkdir);
-EXPORT_SYMBOL(create_proc_entry);
-EXPORT_SYMBOL(proc_create_data);
-EXPORT_SYMBOL(remove_proc_entry);

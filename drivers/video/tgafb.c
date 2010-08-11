@@ -25,7 +25,6 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/selection.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/tc.h>
 
@@ -1663,7 +1662,7 @@ tgafb_register(struct device *dev)
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR "tgafb: Could not register framebuffer\n");
 		ret = -EINVAL;
-		goto err1;
+		goto err2;
 	}
 
 	if (tga_bus_pci) {
@@ -1682,6 +1681,8 @@ tgafb_register(struct device *dev)
 
 	return 0;
 
+ err2:
+	fb_dealloc_cmap(&info->cmap);
  err1:
 	if (mem_base)
 		iounmap(mem_base);

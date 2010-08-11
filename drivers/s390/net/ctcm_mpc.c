@@ -53,7 +53,6 @@
 #include <linux/moduleparam.h>
 #include <asm/idals.h>
 
-#include "cu3088.h"
 #include "ctcm_mpc.h"
 #include "ctcm_main.h"
 #include "ctcm_fsms.h"
@@ -393,7 +392,6 @@ int ctc_mpc_alloc_channel(int port_num, void (*callback)(int, int))
 		} else {
 			/* there are problems...bail out	    */
 			/* there may be a state mismatch so restart */
-			grp->port_persist = 1;
 			fsm_event(grp->fsm, MPCG_EVENT_INOP, dev);
 			grp->allocchan_callback_retries = 0;
 		}
@@ -671,8 +669,7 @@ static void ctcmpc_send_sweep_resp(struct channel *rch)
 				goto done;
 	}
 
-	header = (struct th_sweep *)
-			kmalloc(sizeof(struct th_sweep), gfp_type());
+	header = kmalloc(sizeof(struct th_sweep), gfp_type());
 
 	if (!header) {
 		dev_kfree_skb_any(sweep_skb);
@@ -699,11 +696,9 @@ static void ctcmpc_send_sweep_resp(struct channel *rch)
 	return;
 
 done:
-	if (rc != 0) {
-		grp->in_sweep = 0;
-		ctcm_clear_busy_do(dev);
-		fsm_event(grp->fsm, MPCG_EVENT_INOP, dev);
-	}
+	grp->in_sweep = 0;
+	ctcm_clear_busy_do(dev);
+	fsm_event(grp->fsm, MPCG_EVENT_INOP, dev);
 
 	return;
 }
@@ -1118,7 +1113,6 @@ static void ctcmpc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 
 		if (unlikely(fsm_getstate(grp->fsm) != MPCG_STATE_READY))
 					goto done;
-		pdu_last_seen = 0;
 		while ((pskb->len > 0) && !pdu_last_seen) {
 			curr_pdu = (struct pdu *)pskb->data;
 
@@ -1196,8 +1190,7 @@ static void ctcmpc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			skb_pull(pskb, new_len); /* point to next PDU */
 		}
 	} else {
-		mpcginfo = (struct mpcg_info *)
-				kmalloc(sizeof(struct mpcg_info), gfp_type());
+		mpcginfo = kmalloc(sizeof(struct mpcg_info), gfp_type());
 		if (mpcginfo == NULL)
 					goto done;
 
@@ -1396,8 +1389,7 @@ static void mpc_action_go_inop(fsm_instance *fi, int event, void *arg)
 				CTCM_FUNTAIL, dev->name);
 	if ((grp->saved_state != MPCG_STATE_RESET) ||
 		/* dealloc_channel has been called */
-			((grp->saved_state == MPCG_STATE_RESET) &&
-						(grp->port_persist == 0)))
+		(grp->port_persist == 0))
 		fsm_deltimer(&priv->restart_timer);
 
 	wch = priv->channel[WRITE];
@@ -1917,10 +1909,8 @@ static void mpc_action_doxid7(fsm_instance *fsm, int event, void *arg)
 
 	if (priv)
 		grp = priv->mpcg;
-	if (grp == NULL) {
-		fsm_event(grp->fsm, MPCG_EVENT_INOP, dev);
+	if (grp == NULL)
 		return;
-	}
 
 	for (direction = READ; direction <= WRITE; direction++)	{
 		struct channel *ch = priv->channel[direction];

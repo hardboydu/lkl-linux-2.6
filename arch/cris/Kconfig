@@ -20,6 +20,15 @@ config RWSEM_GENERIC_SPINLOCK
 config RWSEM_XCHGADD_ALGORITHM
 	bool
 
+config GENERIC_TIME
+	def_bool y
+
+config GENERIC_CMOS_UPDATE
+	def_bool y
+
+config ARCH_USES_GETTIMEOFFSET
+	def_bool y
+
 config GENERIC_IOMAP
        bool
        default y
@@ -438,7 +447,7 @@ config ETRAX_SERIAL_PORT0_DMA1_IN
 	help
 	  Enables the DMA1 input channel for ser0 (ttyS0).
 	  If you do not enable DMA, an interrupt for each character will be
-	  used when receiveing data.
+	  used when receiving data.
 	  Normally you want to use DMA, unless you use the DMA channel for
 	  something else.
 
@@ -565,7 +574,7 @@ config ETRAX_SERIAL_PORT2_DMA7_IN
 	help
 	  Enables the DMA7 input channel for ser2 (ttyS2).
 	  If you do not enable DMA, an interrupt for each character will be
-	  used when receiveing data.
+	  used when receiving data.
 	  Normally you want to use DMA, unless you use the DMA channel for
 	  something else.
 
@@ -604,7 +613,7 @@ config ETRAX_SERIAL_PORT3_DMA3_IN
 	help
 	  Enables the DMA3 input channel for ser3 (ttyS3).
 	  If you do not enable DMA, an interrupt for each character will be
-	  used when receiveing data.
+	  used when receiving data.
 	  Normally you want to use DMA, unless you use the DMA channel for
 	  something else.
 

@@ -22,8 +22,7 @@
 #include <asm/div64.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
-#include <mach/hardware.h>
-#include <mach/pxa-regs.h>
+#include <mach/regs-ost.h>
 
 /*
  * This is PXA's sched_clock implementation. This has a resolution
@@ -77,14 +76,12 @@ pxa_ost0_interrupt(int irq, void *dev_id)
 static int
 pxa_osmr0_set_next_event(unsigned long delta, struct clock_event_device *dev)
 {
-	unsigned long flags, next, oscr;
+	unsigned long next, oscr;
 
-	raw_local_irq_save(flags);
 	OIER |= OIER_E0;
 	next = OSCR + delta;
 	OSMR0 = next;
 	oscr = OSCR;
-	raw_local_irq_restore(flags);
 
 	return (signed)(next - oscr) <= MIN_OSCR_DELTA ? -ETIME : 0;
 }
@@ -92,23 +89,17 @@ pxa_osmr0_set_next_event(unsigned long delta, struct clock_event_device *dev)
 static void
 pxa_osmr0_set_mode(enum clock_event_mode mode, struct clock_event_device *dev)
 {
-	unsigned long irqflags;
-
 	switch (mode) {
 	case CLOCK_EVT_MODE_ONESHOT:
-		raw_local_irq_save(irqflags);
 		OIER &= ~OIER_E0;
 		OSSR = OSSR_M0;
-		raw_local_irq_restore(irqflags);
 		break;
 
 	case CLOCK_EVT_MODE_UNUSED:
 	case CLOCK_EVT_MODE_SHUTDOWN:
 		/* initializing, released, or preparing for suspend */
-		raw_local_irq_save(irqflags);
 		OIER &= ~OIER_E0;
 		OSSR = OSSR_M0;
-		raw_local_irq_restore(irqflags);
 		break;
 
 	case CLOCK_EVT_MODE_RESUME:
@@ -126,7 +117,7 @@ static struct clock_event_device ckevt_pxa_osmr0 = {
 	.set_mode	= pxa_osmr0_set_mode,
 };
 
-static cycle_t pxa_read_oscr(void)
+static cycle_t pxa_read_oscr(struct clocksource *cs)
 {
 	return OSCR;
 }

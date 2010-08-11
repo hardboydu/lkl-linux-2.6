@@ -35,8 +35,8 @@
 
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/slab.h>
 
-#include <rdma/ib_cache.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 
@@ -277,7 +277,6 @@ static void ipoib_ib_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
 	skb_reset_mac_header(skb);
 	skb_pull(skb, IPOIB_ENCAP_LEN);
 
-	dev->last_rx = jiffies;
 	++dev->stats.rx_packets;
 	dev->stats.rx_bytes += skb->len;
 
@@ -446,11 +445,11 @@ poll_more:
 		if (dev->features & NETIF_F_LRO)
 			lro_flush_all(&priv->lro.lro_mgr);
 
-		netif_rx_complete(napi);
+		napi_complete(napi);
 		if (unlikely(ib_req_notify_cq(priv->recv_cq,
 					      IB_CQ_NEXT_COMP |
 					      IB_CQ_REPORT_MISSED_EVENTS)) &&
-		    netif_rx_reschedule(napi))
+		    napi_reschedule(napi))
 			goto poll_more;
 	}
 
@@ -462,7 +461,7 @@ void ipoib_ib_completion(struct ib_cq *cq, void *dev_ptr)
 	struct net_device *dev = dev_ptr;
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 
-	netif_rx_schedule(&priv->napi);
+	napi_schedule(&priv->napi);
 }
 
 static void drain_tx_cq(struct net_device *dev)
@@ -531,7 +530,7 @@ void ipoib_send(struct net_device *dev, struct sk_buff *skb,
 {
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 	struct ipoib_tx_buf *tx_req;
-	int hlen;
+	int hlen, rc;
 	void *phead;
 
 	if (skb_is_gso(skb)) {
@@ -587,9 +586,10 @@ void ipoib_send(struct net_device *dev, struct sk_buff *skb,
 		netif_stop_queue(dev);
 	}
 
-	if (unlikely(post_send(priv, priv->tx_head & (ipoib_sendq_size - 1),
-			       address->ah, qpn, tx_req, phead, hlen))) {
-		ipoib_warn(priv, "post_send failed\n");
+	rc = post_send(priv, priv->tx_head & (ipoib_sendq_size - 1),
+		       address->ah, qpn, tx_req, phead, hlen);
+	if (unlikely(rc)) {
+		ipoib_warn(priv, "post_send failed, error %d\n", rc);
 		++dev->stats.tx_errors;
 		--priv->tx_outstanding;
 		ipoib_dma_unmap_tx(priv->ca, tx_req);
@@ -685,7 +685,8 @@ int ipoib_ib_dev_open(struct net_device *dev)
 	queue_delayed_work(ipoib_workqueue, &priv->ah_reap_task,
 			   round_jiffies_relative(HZ));
 
-	set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags);
+	if (!test_and_set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
+		napi_enable(&priv->napi);
 
 	return 0;
 }
@@ -804,7 +805,8 @@ int ipoib_ib_dev_stop(struct net_device *dev, int flush)
 	struct ipoib_tx_buf *tx_req;
 	int i;
 
-	clear_bit(IPOIB_FLAG_INITIALIZED, &priv->flags);
+	if (test_and_clear_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
+		napi_disable(&priv->napi);
 
 	ipoib_cm_dev_stop(dev);
 

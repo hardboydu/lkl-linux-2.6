@@ -4,8 +4,6 @@
 #include <linux/types.h>
 #include <linux/i2c.h>
 
-struct dentry;
-
 /* Definitions of frame buffers						*/
 
 #define FB_MAX			32	/* sufficient for now */
@@ -37,7 +35,7 @@ struct dentry;
 #define FBIOGET_HWCINFO         0x4616
 #define FBIOPUT_MODEINFO        0x4617
 #define FBIOGET_DISPINFO        0x4618
-
+#define FBIO_WAITFORVSYNC	_IOW('F', 0x20, __u32)
 
 #define FB_TYPE_PACKED_PIXELS		0	/* Packed Pixels	*/
 #define FB_TYPE_PLANES			1	/* Non interleaved planes */
@@ -123,6 +121,7 @@ struct dentry;
 #define FB_ACCEL_TRIDENT_3DIMAGE 51	/* Trident 3DImage		*/
 #define FB_ACCEL_TRIDENT_BLADE3D 52	/* Trident Blade3D		*/
 #define FB_ACCEL_TRIDENT_BLADEXP 53	/* Trident BladeXP		*/
+#define FB_ACCEL_CIRRUS_ALPINE   53	/* Cirrus Logic 543x/544x/5480	*/
 #define FB_ACCEL_NEOMAGIC_NM2070 90	/* NeoMagic NM2070              */
 #define FB_ACCEL_NEOMAGIC_NM2090 91	/* NeoMagic NM2090              */
 #define FB_ACCEL_NEOMAGIC_NM2093 92	/* NeoMagic NM2093              */
@@ -132,6 +131,7 @@ struct dentry;
 #define FB_ACCEL_NEOMAGIC_NM2230 96	/* NeoMagic NM2230              */
 #define FB_ACCEL_NEOMAGIC_NM2360 97	/* NeoMagic NM2360              */
 #define FB_ACCEL_NEOMAGIC_NM2380 98	/* NeoMagic NM2380              */
+#define FB_ACCEL_PXA3XX		 99	/* PXA3xx			*/
 
 #define FB_ACCEL_SAVAGE4        0x80	/* S3 Savage4                   */
 #define FB_ACCEL_SAVAGE3D       0x81	/* S3 Savage3D                  */
@@ -172,8 +172,12 @@ struct fb_fix_screeninfo {
 /* Interpretation of offset for color fields: All offsets are from the right,
  * inside a "pixel" value, which is exactly 'bits_per_pixel' wide (means: you
  * can use the offset as right argument to <<). A pixel afterwards is a bit
- * stream and is written to video memory as that unmodified. This implies
- * big-endian byte order if bits_per_pixel is greater than 8.
+ * stream and is written to video memory as that unmodified.
+ *
+ * For pseudocolor: offset and length should be the same for all color
+ * components. Offset specifies the position of the least significant bit
+ * of the pallette index in a pixel value. Length indicates the number
+ * of available palette entries (i.e. # of entries = 1 << length).
  */
 struct fb_bitfield {
 	__u32 offset;			/* beginning of bitfield	*/
@@ -397,6 +401,7 @@ struct fb_cursor {
 #include <linux/notifier.h>
 #include <linux/list.h>
 #include <linux/backlight.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 
 struct vm_area_struct;
@@ -537,6 +542,8 @@ struct fb_cursor_user {
 #define FB_EVENT_GET_REQ                0x0D
 /*      Unbind from the console if possible */
 #define FB_EVENT_FB_UNBIND              0x0E
+/*      CONSOLE-SPECIFIC: remap all consoles to new fb - for vga switcheroo */
+#define FB_EVENT_REMAP_ALL_CONSOLE      0x0F
 
 struct fb_event {
 	struct fb_info *info;
@@ -663,15 +670,12 @@ struct fb_ops {
 	/* perform fb specific mmap */
 	int (*fb_mmap)(struct fb_info *info, struct vm_area_struct *vma);
 
-	/* save current hardware state */
-	void (*fb_save_state)(struct fb_info *info);
-
-	/* restore saved state */
-	void (*fb_restore_state)(struct fb_info *info);
-
 	/* get capability given var */
 	void (*fb_get_caps)(struct fb_info *info, struct fb_blit_caps *caps,
 			    struct fb_var_screeninfo *var);
+
+	/* teardown any resources to do with this framebuffer */
+	void (*fb_destroy)(struct fb_info *info);
 };
 
 #ifdef CONFIG_FB_TILEBLITTING
@@ -760,6 +764,7 @@ struct fb_tile_ops {
 	 *  takes over; acceleration engine should be in a quiescent state */
 
 /* hints */
+#define FBINFO_VIRTFB		0x0004 /* FB is System RAM, not device. */
 #define FBINFO_PARTIAL_PAN_OK	0x0040 /* otw use pan only for double-buffering */
 #define FBINFO_READS_FAST	0x0080 /* soft-copy faster than rendering */
 
@@ -794,6 +799,8 @@ struct fb_tile_ops {
  */
 #define FBINFO_MISC_ALWAYS_SETPAR   0x40000
 
+/* where the fb is a firmware driver, and can be replaced with a proper one */
+#define FBINFO_MISC_FIRMWARE        0x80000
 /*
  * Host and GPU endianness differ.
  */
@@ -809,6 +816,7 @@ struct fb_info {
 	int node;
 	int flags;
 	struct mutex lock;		/* Lock for open/release/ioctl funcs */
+	struct mutex mm_lock;		/* Lock for fb_mmap and smem_* fields */
 	struct fb_var_screeninfo var;	/* Current var */
 	struct fb_fix_screeninfo fix;	/* Current fix */
 	struct fb_monspecs monspecs;	/* Current Monitor specs */
@@ -849,8 +857,27 @@ struct fb_info {
 	u32 state;			/* Hardware state i.e suspend */
 	void *fbcon_par;                /* fbcon use-only private area */
 	/* From here on everything is device dependent */
-	void *par;	
+	void *par;
+	/* we need the PCI or similiar aperture base/size not
+	   smem_start/size as smem_start may just be an object
+	   allocated inside the aperture so may not actually overlap */
+	struct apertures_struct {
+		unsigned int count;
+		struct aperture {
+			resource_size_t base;
+			resource_size_t size;
+		} ranges[0];
+	} *apertures;
 };
+
+static inline struct apertures_struct *alloc_apertures(unsigned int max_num) {
+	struct apertures_struct *a = kzalloc(sizeof(struct apertures_struct)
+			+ max_num * sizeof(struct aperture), GFP_KERNEL);
+	if (!a)
+		return NULL;
+	a->count = max_num;
+	return a;
+}
 
 #ifdef MODULE
 #define FBINFO_DEFAULT	FBINFO_MODULE
@@ -888,7 +915,7 @@ struct fb_info {
 #define fb_writeq sbus_writeq
 #define fb_memset sbus_memset_io
 
-#elif defined(__i386__) || defined(__alpha__) || defined(__x86_64__) || defined(__hppa__) || defined(__sh__) || defined(__powerpc__) || defined(__avr32__)
+#elif defined(__i386__) || defined(__alpha__) || defined(__x86_64__) || defined(__hppa__) || defined(__sh__) || defined(__powerpc__) || defined(__avr32__) || defined(__bfin__)
 
 #define fb_readb __raw_readb
 #define fb_readw __raw_readw
@@ -944,6 +971,8 @@ extern ssize_t fb_sys_write(struct fb_info *info, const char __user *buf,
 /* drivers/video/fbmem.c */
 extern int register_framebuffer(struct fb_info *fb_info);
 extern int unregister_framebuffer(struct fb_info *fb_info);
+extern void remove_conflicting_framebuffers(struct apertures_struct *a,
+				const char *name, bool primary);
 extern int fb_prepare_logo(struct fb_info *fb_info, int rotate);
 extern int fb_show_logo(struct fb_info *fb_info, int rotate);
 extern char* fb_get_buffer_offset(struct fb_info *info, struct fb_pixmap *buf, u32 size);
@@ -960,15 +989,7 @@ extern struct fb_info *registered_fb[FB_MAX];
 extern int num_registered_fb;
 extern struct class *fb_class;
 
-static inline int lock_fb_info(struct fb_info *info)
-{
-	mutex_lock(&info->lock);
-	if (!info->fbops) {
-		mutex_unlock(&info->lock);
-		return 0;
-	}
-	return 1;
-}
+extern int lock_fb_info(struct fb_info *info);
 
 static inline void unlock_fb_info(struct fb_info *info)
 {
@@ -996,8 +1017,7 @@ extern void fb_deferred_io_open(struct fb_info *info,
 				struct inode *inode,
 				struct file *file);
 extern void fb_deferred_io_cleanup(struct fb_info *info);
-extern int fb_deferred_io_fsync(struct file *file, struct dentry *dentry,
-				int datasync);
+extern int fb_deferred_io_fsync(struct file *file, int datasync);
 
 static inline bool fb_be_math(struct fb_info *info)
 {

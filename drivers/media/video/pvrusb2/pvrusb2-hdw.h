@@ -132,6 +132,9 @@ unsigned long pvr2_hdw_get_sn(struct pvr2_hdw *);
 /* Retrieve bus location info of device */
 const char *pvr2_hdw_get_bus_info(struct pvr2_hdw *);
 
+/* Retrieve per-instance string identifier for this specific device */
+const char *pvr2_hdw_get_device_identifier(struct pvr2_hdw *);
+
 /* Called when hardware has been unplugged */
 void pvr2_hdw_disconnect(struct pvr2_hdw *);
 
@@ -216,7 +219,7 @@ int pvr2_hdw_get_stdenum_value(struct pvr2_hdw *hdw,struct v4l2_standard *std,
    this may prevent the device from running (and leaving this mode may
    imply a device reset). */
 void pvr2_hdw_cpufw_set_enabled(struct pvr2_hdw *,
-				int prom_flag,
+				int mode, /* 0=8KB FX2, 1=16KB FX2, 2=PROM */
 				int enable_flag);
 
 /* Return true if we're in a mode for retrieval CPU firmware */
@@ -236,8 +239,7 @@ void pvr2_hdw_v4l_store_minor_number(struct pvr2_hdw *,
 				     enum pvr2_v4l_type index,int);
 
 /* Direct read/write access to chip's registers:
-   match_type - how to interpret match_chip (e.g. driver ID, i2c address)
-   match_chip - chip match value (e.g. I2C_DRIVERD_xxxx)
+   match - specify criteria to identify target chip (this is a v4l dbg struct)
    reg_id  - register number to access
    setFl   - true to set the register, false to read it
    val_ptr - storage location for source / result. */
@@ -304,6 +306,7 @@ struct pvr2_hdw_debug_info {
 	int state_encoder_ok;
 	int state_encoder_run;
 	int state_decoder_run;
+	int state_decoder_ready;
 	int state_usbstream_run;
 	int state_decoder_quiescent;
 	int state_pipeline_config;

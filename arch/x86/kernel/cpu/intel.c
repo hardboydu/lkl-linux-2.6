@@ -4,18 +4,19 @@
 #include <linux/string.h>
 #include <linux/bitops.h>
 #include <linux/smp.h>
+#include <linux/sched.h>
 #include <linux/thread_info.h>
 #include <linux/module.h>
+#include <linux/uaccess.h>
 
 #include <asm/processor.h>
 #include <asm/pgtable.h>
 #include <asm/msr.h>
-#include <asm/uaccess.h>
-#include <asm/ds.h>
 #include <asm/bugs.h>
+#include <asm/cpu.h>
 
 #ifdef CONFIG_X86_64
-#include <asm/topology.h>
+#include <linux/topology.h>
 #include <asm/numa_64.h>
 #endif
 
@@ -24,7 +25,6 @@
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/mpspec.h>
 #include <asm/apic.h>
-#include <mach_apic.h>
 #endif
 
 static void __cpuinit early_init_intel(struct cpuinfo_x86 *c)
@@ -46,6 +46,27 @@ static void __cpuinit early_init_intel(struct cpuinfo_x86 *c)
 		(c->x86 == 0x6 && c->x86_model >= 0x0e))
 		set_cpu_cap(c, X86_FEATURE_CONSTANT_TSC);
 
+	/*
+	 * Atom erratum AAE44/AAF40/AAG38/AAH41:
+	 *
+	 * A race condition between speculative fetches and invalidating
+	 * a large page.  This is worked around in microcode, but we
+	 * need the microcode to have already been loaded... so if it is
+	 * not, recommend a BIOS update and disable large pages.
+	 */
+	if (c->x86 == 6 && c->x86_model == 0x1c && c->x86_mask <= 2) {
+		u32 ucode, junk;
+
+		wrmsr(MSR_IA32_UCODE_REV, 0, 0);
+		sync_core();
+		rdmsr(MSR_IA32_UCODE_REV, junk, ucode);
+
+		if (ucode < 0x20e) {
+			printk(KERN_WARNING "Atom PSE erratum detected, BIOS microcode update recommended\n");
+			clear_cpu_cap(c, X86_FEATURE_PSE);
+		}
+	}
+
 #ifdef CONFIG_X86_64
 	set_cpu_cap(c, X86_FEATURE_SYSENTER32);
 #else
@@ -54,15 +75,60 @@ static void __cpuinit early_init_intel(struct cpuinfo_x86 *c)
 		c->x86_cache_alignment = 128;
 #endif
 
+	/* CPUID workaround for 0F33/0F34 CPU */
+	if (c->x86 == 0xF && c->x86_model == 0x3
+	    && (c->x86_mask == 0x3 || c->x86_mask == 0x4))
+		c->x86_phys_bits = 36;
+
 	/*
 	 * c->x86_power is 8000_0007 edx. Bit 8 is TSC runs at constant rate
-	 * with P/T states and does not stop in deep C-states
+	 * with P/T states and does not stop in deep C-states.
+	 *
+	 * It is also reliable across cores and sockets. (but not across
+	 * cabinets - we turn it off in that case explicitly.)
 	 */
 	if (c->x86_power & (1 << 8)) {
 		set_cpu_cap(c, X86_FEATURE_CONSTANT_TSC);
 		set_cpu_cap(c, X86_FEATURE_NONSTOP_TSC);
+		if (!check_tsc_unstable())
+			sched_clock_stable = 1;
 	}
 
+	/*
+	 * There is a known erratum on Pentium III and Core Solo
+	 * and Core Duo CPUs.
+	 * " Page with PAT set to WC while associated MTRR is UC
+	 *   may consolidate to UC "
+	 * Because of this erratum, it is better to stick with
+	 * setting WC in MTRR rather than using PAT on these CPUs.
+	 *
+	 * Enable PAT WC only on P4, Core 2 or later CPUs.
+	 */
+	if (c->x86 == 6 && c->x86_model < 15)
+		clear_cpu_cap(c, X86_FEATURE_PAT);
+
+#ifdef CONFIG_KMEMCHECK
+	/*
+	 * P4s have a "fast strings" feature which causes single-
+	 * stepping REP instructions to only generate a #DB on
+	 * cache-line boundaries.
+	 *
+	 * Ingo Molnar reported a Pentium D (model 6) and a Xeon
+	 * (model 2) with the same problem.
+	 */
+	if (c->x86 == 15) {
+		u64 misc_enable;
+
+		rdmsrl(MSR_IA32_MISC_ENABLE, misc_enable);
+
+		if (misc_enable & MSR_IA32_MISC_ENABLE_FAST_STRING) {
+			printk(KERN_INFO "kmemcheck: Disabling fast string operations\n");
+
+			misc_enable &= ~MSR_IA32_MISC_ENABLE_FAST_STRING;
+			wrmsrl(MSR_IA32_MISC_ENABLE, misc_enable);
+		}
+	}
+#endif
 }
 
 #ifdef CONFIG_X86_32
@@ -99,6 +165,28 @@ static void __cpuinit trap_init_f00f_bug(void)
 }
 #endif
 
+static void __cpuinit intel_smp_check(struct cpuinfo_x86 *c)
+{
+#ifdef CONFIG_SMP
+	/* calling is from identify_secondary_cpu() ? */
+	if (c->cpu_index == boot_cpu_id)
+		return;
+
+	/*
+	 * Mask B, Pentium, but not Pentium MMX
+	 */
+	if (c->x86 == 5 &&
+	    c->x86_mask >= 1 && c->x86_mask <= 4 &&
+	    c->x86_model <= 3) {
+		/*
+		 * Remember we have B step Pentia with bugs
+		 */
+		WARN_ONCE(1, "WARNING: SMP operation may be unreliable"
+				    "with B stepping processors.\n");
+	}
+#endif
+}
+
 static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
 {
 	unsigned long lo, hi;
@@ -106,7 +194,8 @@ static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
 #ifdef CONFIG_X86_F00F_BUG
 	/*
 	 * All current models of Pentium and Pentium with MMX technology CPUs
-	 * have the F0 0F bug, which lets nonprivileged users lock up the system.
+	 * have the F0 0F bug, which lets nonprivileged users lock up the
+	 * system.
 	 * Note that the workaround only should be initialized once...
 	 */
 	c->f00f_bug = 0;
@@ -135,11 +224,11 @@ static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
 	 */
 	if ((c->x86 == 15) && (c->x86_model == 1) && (c->x86_mask == 1)) {
 		rdmsr(MSR_IA32_MISC_ENABLE, lo, hi);
-		if ((lo & (1<<9)) == 0) {
+		if ((lo & MSR_IA32_MISC_ENABLE_PREFETCH_DISABLE) == 0) {
 			printk (KERN_INFO "CPU: C0 stepping P4 Xeon detected.\n");
 			printk (KERN_INFO "CPU: Disabling hardware prefetching (Errata 037)\n");
-			lo |= (1<<9);	/* Disable hw prefetching */
-			wrmsr (MSR_IA32_MISC_ENABLE, lo, hi);
+			lo |= MSR_IA32_MISC_ENABLE_PREFETCH_DISABLE;
+			wrmsr(MSR_IA32_MISC_ENABLE, lo, hi);
 		}
 	}
 
@@ -175,6 +264,8 @@ static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
 #ifdef CONFIG_X86_NUMAQ
 	numaq_tsc_disable();
 #endif
+
+	intel_smp_check(c);
 }
 #else
 static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
@@ -182,21 +273,23 @@ static void __cpuinit intel_workarounds(struct cpuinfo_x86 *c)
 }
 #endif
 
-static void __cpuinit srat_detect_node(void)
+static void __cpuinit srat_detect_node(struct cpuinfo_x86 *c)
 {
 #if defined(CONFIG_NUMA) && defined(CONFIG_X86_64)
 	unsigned node;
 	int cpu = smp_processor_id();
-	int apicid = hard_smp_processor_id();
+	int apicid = cpu_has_apic ? hard_smp_processor_id() : c->apicid;
 
 	/* Don't do the funky fallback heuristics the AMD version employs
 	   for now. */
 	node = apicid_to_node[apicid];
-	if (node == NUMA_NO_NODE || !node_online(node))
+	if (node == NUMA_NO_NODE)
 		node = first_node(node_online_map);
+	else if (!node_online(node)) {
+		/* reuse the value from init_cpu_to_node() */
+		node = cpu_to_node(cpu);
+	}
 	numa_set_node(cpu, node);
-
-	printk(KERN_INFO "CPU %d/0x%x -> Node %d\n", cpu, apicid, node);
 #endif
 }
 
@@ -213,7 +306,7 @@ static int __cpuinit intel_num_cpu_cores(struct cpuinfo_x86 *c)
 	/* Intel has a non-standard dependency on %ecx for this CPUID level. */
 	cpuid_count(4, 0, &eax, &ebx, &ecx, &edx);
 	if (eax & 0x1f)
-		return ((eax >> 26) + 1);
+		return (eax >> 26) + 1;
 	else
 		return 1;
 }
@@ -288,7 +381,6 @@ static void __cpuinit init_intel(struct cpuinfo_x86 *c)
 			set_cpu_cap(c, X86_FEATURE_BTS);
 		if (!(l1 & (1<<12)))
 			set_cpu_cap(c, X86_FEATURE_PEBS);
-		ds_init_intel(c);
 	}
 
 	if (c->x86 == 6 && c->x86_model == 29 && cpu_has_clflush)
@@ -353,7 +445,7 @@ static void __cpuinit init_intel(struct cpuinfo_x86 *c)
 	}
 
 	/* Work around errata */
-	srat_detect_node();
+	srat_detect_node(c);
 
 	if (cpu_has(c, X86_FEATURE_VMX))
 		detect_vmx_virtcap(c);
@@ -374,7 +466,7 @@ static unsigned int __cpuinit intel_size_cache(struct cpuinfo_x86 *c, unsigned i
 }
 #endif
 
-static struct cpu_dev intel_cpu_dev __cpuinitdata = {
+static const struct cpu_dev __cpuinitconst intel_cpu_dev = {
 	.c_vendor	= "Intel",
 	.c_ident	= { "GenuineIntel" },
 #ifdef CONFIG_X86_32

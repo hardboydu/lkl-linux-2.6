@@ -26,7 +26,7 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 
 #include <asm/prom.h>
 #include <asm/mmu.h>
@@ -72,11 +72,8 @@ unsigned long p_mapped_by_bats(phys_addr_t pa)
 	return 0;
 }
 
-unsigned long __init mmu_mapin_ram(void)
+unsigned long __init mmu_mapin_ram(unsigned long top)
 {
-#ifdef CONFIG_POWER4
-	return 0;
-#else
 	unsigned long tot, bl, done;
 	unsigned long max_size = (256<<20);
 
@@ -89,13 +86,13 @@ unsigned long __init mmu_mapin_ram(void)
 
 	/* Make sure we don't map a block larger than the
 	   smallest alignment of the physical address. */
-	tot = total_lowmem;
+	tot = top;
 	for (bl = 128<<10; bl < max_size; bl <<= 1) {
 		if (bl * 2 > tot)
 			break;
 	}
 
-	setbat(2, PAGE_OFFSET, 0, bl, _PAGE_RAM);
+	setbat(2, PAGE_OFFSET, 0, bl, PAGE_KERNEL_X);
 	done = (unsigned long)bat_addrs[2].limit - PAGE_OFFSET + 1;
 	if ((done < tot) && !bat_addrs[3].limit) {
 		/* use BAT3 to cover a bit more */
@@ -103,12 +100,11 @@ unsigned long __init mmu_mapin_ram(void)
 		for (bl = 128<<10; bl < max_size; bl <<= 1)
 			if (bl * 2 > tot)
 				break;
-		setbat(3, PAGE_OFFSET+done, done, bl, _PAGE_RAM);
+		setbat(3, PAGE_OFFSET+done, done, bl, PAGE_KERNEL_X);
 		done = (unsigned long)bat_addrs[3].limit - PAGE_OFFSET + 1;
 	}
 
 	return done;
-#endif
 }
 
 /*
@@ -136,9 +132,7 @@ void __init setbat(int index, unsigned long virt, phys_addr_t phys,
 		wimgxpp |= (flags & _PAGE_RW)? BPP_RW: BPP_RX;
 		bat[1].batu = virt | (bl << 2) | 2; /* Vs=1, Vp=0 */
 		bat[1].batl = BAT_PHYS_ADDR(phys) | wimgxpp;
-#ifndef CONFIG_KGDB /* want user access for breakpoints */
 		if (flags & _PAGE_USER)
-#endif
 			bat[1].batu |= 1; 	/* Vp = 1 */
 		if (flags & _PAGE_GUARDED) {
 			/* G bit must be zero in IBATs */
@@ -229,7 +223,7 @@ void __init MMU_init_hw(void)
 	 * Find some memory for the hash table.
 	 */
 	if ( ppc_md.progress ) ppc_md.progress("hash:find piece", 0x322);
-	Hash = __va(lmb_alloc_base(Hash_size, Hash_size,
+	Hash = __va(memblock_alloc_base(Hash_size, Hash_size,
 				   __initial_memory_limit_addr));
 	cacheable_memzero(Hash, Hash_size);
 	_SDR1 = __pa(Hash) | SDR1_LOW_BITS;

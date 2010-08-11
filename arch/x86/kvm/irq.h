@@ -32,6 +32,8 @@
 #include "lapic.h"
 
 #define PIC_NUM_PINS 16
+#define SELECT_PIC(irq) \
+	((irq) < 8 ? KVM_IRQCHIP_PIC_MASTER : KVM_IRQCHIP_PIC_SLAVE)
 
 struct kvm;
 struct kvm_vcpu;
@@ -60,7 +62,7 @@ struct kvm_kpic_state {
 };
 
 struct kvm_pic {
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	bool wakeup_needed;
 	unsigned pending_acks;
 	struct kvm *kvm;
@@ -70,9 +72,11 @@ struct kvm_pic {
 	int output;		/* intr from master PIC */
 	struct kvm_io_device dev;
 	void (*ack_notifier)(void *opaque, int irq);
+	unsigned long irq_states[16];
 };
 
 struct kvm_pic *kvm_create_pic(struct kvm *kvm);
+void kvm_destroy_pic(struct kvm *kvm);
 int kvm_pic_read_irq(struct kvm *kvm);
 void kvm_pic_update_irq(struct kvm_pic *s);
 void kvm_pic_clear_isr_ack(struct kvm *kvm);
@@ -84,7 +88,11 @@ static inline struct kvm_pic *pic_irqchip(struct kvm *kvm)
 
 static inline int irqchip_in_kernel(struct kvm *kvm)
 {
-	return pic_irqchip(kvm) != NULL;
+	int ret;
+
+	ret = (pic_irqchip(kvm) != NULL);
+	smp_rmb();
+	return ret;
 }
 
 void kvm_pic_reset(struct kvm_kpic_state *s);

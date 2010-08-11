@@ -64,10 +64,12 @@
 #define M41T80_FEATURE_BL	(1 << 1)	/* Battery low indicator */
 #define M41T80_FEATURE_SQ	(1 << 2)	/* Squarewave feature */
 #define M41T80_FEATURE_WD	(1 << 3)	/* Extra watchdog resolution */
+#define M41T80_FEATURE_SQ_ALT	(1 << 4)	/* RSx bits are in reg 4 */
 
 #define DRV_VERSION "0.05"
 
 static const struct i2c_device_id m41t80_id[] = {
+	{ "m41t62", M41T80_FEATURE_SQ | M41T80_FEATURE_SQ_ALT },
 	{ "m41t65", M41T80_FEATURE_HT | M41T80_FEATURE_WD },
 	{ "m41t80", M41T80_FEATURE_SQ },
 	{ "m41t81", M41T80_FEATURE_HT | M41T80_FEATURE_SQ},
@@ -393,12 +395,15 @@ static ssize_t m41t80_sysfs_show_sqwfreq(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct m41t80_data *clientdata = i2c_get_clientdata(client);
-	int val;
+	int val, reg_sqw;
 
 	if (!(clientdata->features & M41T80_FEATURE_SQ))
 		return -EINVAL;
 
-	val = i2c_smbus_read_byte_data(client, M41T80_REG_SQW);
+	reg_sqw = M41T80_REG_SQW;
+	if (clientdata->features & M41T80_FEATURE_SQ_ALT)
+		reg_sqw = M41T80_REG_WDAY;
+	val = i2c_smbus_read_byte_data(client, reg_sqw);
 	if (val < 0)
 		return -EIO;
 	val = (val >> 4) & 0xf;
@@ -419,7 +424,7 @@ static ssize_t m41t80_sysfs_set_sqwfreq(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct m41t80_data *clientdata = i2c_get_clientdata(client);
-	int almon, sqw;
+	int almon, sqw, reg_sqw;
 	int val = simple_strtoul(buf, NULL, 0);
 
 	if (!(clientdata->features & M41T80_FEATURE_SQ))
@@ -440,13 +445,16 @@ static ssize_t m41t80_sysfs_set_sqwfreq(struct device *dev,
 	almon = i2c_smbus_read_byte_data(client, M41T80_REG_ALARM_MON);
 	if (almon < 0)
 		return -EIO;
-	sqw = i2c_smbus_read_byte_data(client, M41T80_REG_SQW);
+	reg_sqw = M41T80_REG_SQW;
+	if (clientdata->features & M41T80_FEATURE_SQ_ALT)
+		reg_sqw = M41T80_REG_WDAY;
+	sqw = i2c_smbus_read_byte_data(client, reg_sqw);
 	if (sqw < 0)
 		return -EIO;
 	sqw = (sqw & 0x0f) | (val << 4);
 	if (i2c_smbus_write_byte_data(client, M41T80_REG_ALARM_MON,
 				      almon & ~M41T80_ALMON_SQWE) < 0 ||
-	    i2c_smbus_write_byte_data(client, M41T80_REG_SQW, sqw) < 0)
+	    i2c_smbus_write_byte_data(client, reg_sqw, sqw) < 0)
 		return -EIO;
 	if (val && i2c_smbus_write_byte_data(client, M41T80_REG_ALARM_MON,
 					     almon | M41T80_ALMON_SQWE) < 0)
@@ -587,10 +595,6 @@ static void wdt_disable(void)
 static ssize_t wdt_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
-	/*  Can't seek (pwrite) on this device
-	if (ppos != &file->f_pos)
-	return -ESPIPE;
-	*/
 	if (count) {
 		wdt_ping();
 		return 1;
@@ -615,7 +619,7 @@ static ssize_t wdt_read(struct file *file, char __user *buf,
  *	according to their available features. We only actually usefully support
  *	querying capabilities and current status.
  */
-static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
+static int wdt_ioctl(struct file *file, unsigned int cmd,
 		     unsigned long arg)
 {
 	int new_margin, rv;
@@ -668,6 +672,18 @@ static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	return -ENOTTY;
 }
 
+static long wdt_unlocked_ioctl(struct file *file, unsigned int cmd,
+			       unsigned long arg)
+{
+	int ret;
+
+	lock_kernel();
+	ret = wdt_ioctl(file, cmd, arg);
+	unlock_kernel();
+
+	return ret;
+}
+
 /**
  *	wdt_open:
  *	@inode: inode of device
@@ -687,7 +703,7 @@ static int wdt_open(struct inode *inode, struct file *file)
 		 */
 		wdt_is_open = 1;
 		unlock_kernel();
-		return 0;
+		return nonseekable_open(inode, file);
 	}
 	return -ENODEV;
 }
@@ -728,7 +744,7 @@ static int wdt_notify_sys(struct notifier_block *this, unsigned long code,
 static const struct file_operations wdt_fops = {
 	.owner	= THIS_MODULE,
 	.read	= wdt_read,
-	.ioctl	= wdt_ioctl,
+	.unlocked_ioctl = wdt_unlocked_ioctl,
 	.write	= wdt_write,
 	.open	= wdt_open,
 	.release = wdt_release,

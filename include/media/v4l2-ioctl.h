@@ -15,10 +15,13 @@
 #include <linux/mutex.h>
 #include <linux/compiler.h> /* need __user */
 #ifdef CONFIG_VIDEO_V4L1_COMPAT
+#define __MIN_V4L1
 #include <linux/videodev.h>
 #else
 #include <linux/videodev2.h>
 #endif
+
+struct v4l2_fh;
 
 struct v4l2_ioctl_ops {
 	/* ioctl callbacks */
@@ -238,6 +241,26 @@ struct v4l2_ioctl_ops {
 	int (*vidioc_enum_frameintervals) (struct file *file, void *fh,
 					   struct v4l2_frmivalenum *fival);
 
+	/* DV Timings IOCTLs */
+	int (*vidioc_enum_dv_presets) (struct file *file, void *fh,
+				       struct v4l2_dv_enum_preset *preset);
+
+	int (*vidioc_s_dv_preset) (struct file *file, void *fh,
+				   struct v4l2_dv_preset *preset);
+	int (*vidioc_g_dv_preset) (struct file *file, void *fh,
+				   struct v4l2_dv_preset *preset);
+	int (*vidioc_query_dv_preset) (struct file *file, void *fh,
+					struct v4l2_dv_preset *qpreset);
+	int (*vidioc_s_dv_timings) (struct file *file, void *fh,
+				    struct v4l2_dv_timings *timings);
+	int (*vidioc_g_dv_timings) (struct file *file, void *fh,
+				    struct v4l2_dv_timings *timings);
+
+	int (*vidioc_subscribe_event)  (struct v4l2_fh *fh,
+					struct v4l2_event_subscription *sub);
+	int (*vidioc_unsubscribe_event)(struct v4l2_fh *fh,
+					struct v4l2_event_subscription *sub);
+
 	/* For other private ioctls */
 	long (*vidioc_default)	       (struct file *file, void *fh,
 					int cmd, void *arg);
@@ -267,6 +290,7 @@ struct v4l2_ioctl_ops {
 
 /*  Video standard functions  */
 extern const char *v4l2_norm_to_name(v4l2_std_id id);
+extern void v4l2_video_std_frame_period(int id, struct v4l2_fract *frameperiod);
 extern int v4l2_video_std_construct(struct v4l2_standard *vs,
 				    int id, const char *name);
 /* Prints the ioctl in a human-readable format */

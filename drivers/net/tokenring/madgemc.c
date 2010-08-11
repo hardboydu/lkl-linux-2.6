@@ -21,6 +21,7 @@ static const char version[] = "madgemc.c: v0.91 23/01/2000 by Adam Fritzler\n";
 
 #include <linux/module.h>
 #include <linux/mca.h>
+#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -108,7 +109,6 @@ static void madgemc_sifwriteb(struct net_device *dev, unsigned short val, unsign
 		SIFWRITEB(val, reg);
 		madgemc_setregpage(dev, 0);
 	}
-	return;
 }
 
 /*
@@ -139,10 +139,9 @@ static void madgemc_sifwritew(struct net_device *dev, unsigned short val, unsign
 		SIFWRITEW(val, reg);
 		madgemc_setregpage(dev, 0);
 	}
-	return;
 }
 
-
+static struct net_device_ops madgemc_netdev_ops __read_mostly;
 
 static int __devinit madgemc_probe(struct device *device)
 {	
@@ -168,7 +167,7 @@ static int __devinit madgemc_probe(struct device *device)
 		goto getout;
 	}
 
-	dev->dma = 0;
+	dev->netdev_ops = &madgemc_netdev_ops;
 
 	card = kmalloc(sizeof(struct card_info), GFP_KERNEL);
 	if (card==NULL) {
@@ -348,9 +347,6 @@ static int __devinit madgemc_probe(struct device *device)
 
 	memcpy(tp->ProductID, "Madge MCA 16/4    ", PROD_ID_SIZE + 1);
 
-	dev->open = madgemc_open;
-	dev->stop = madgemc_close;
-
 	tp->tmspriv = card;
 	dev_set_drvdata(device, dev);
 
@@ -507,8 +503,6 @@ static void madgemc_setregpage(struct net_device *dev, int page)
 		     dev->base_addr + MC_CONTROL_REG1);
 	}
 	reg1 = inb(dev->base_addr + MC_CONTROL_REG1);
-
-	return;
 }
 
 /*
@@ -529,8 +523,6 @@ static void madgemc_setsifsel(struct net_device *dev, int val)
 		     dev->base_addr + MC_CONTROL_REG0);
 	}	
 	reg0 = inb(dev->base_addr + MC_CONTROL_REG0);
-
-	return;
 }
 
 /*
@@ -552,8 +544,6 @@ static void madgemc_setint(struct net_device *dev, int val)
 		outb(reg1 | MC_CONTROL_REG1_SINTEN, 
 		     dev->base_addr + MC_CONTROL_REG1);
 	}
-
-	return;
 }
 
 /*
@@ -596,8 +586,6 @@ static void madgemc_chipset_close(struct net_device *dev)
 	madgemc_setint(dev, 0);
 	/* unmap SIF registers */
 	madgemc_setsifsel(dev, 0);
-
-	return;
 }
 
 /*
@@ -658,8 +646,6 @@ static void madgemc_read_rom(struct net_device *dev, struct card_info *card)
 	/* Restore original register values */
 	outb(reg0, ioaddr + MC_CONTROL_REG0);
 	outb(reg1, ioaddr + MC_CONTROL_REG1);
-	
-	return;
 }
 
 static int madgemc_open(struct net_device *dev)
@@ -692,8 +678,6 @@ static int madgemc_mcaproc(char *buf, int slot, void *d)
 	
 	len += sprintf(buf+len, "-------\n");
 	if (curcard) {
-		struct net_local *tp = netdev_priv(dev);
-		
 		len += sprintf(buf+len, "Card Revision: %d\n", curcard->cardrev);
 		len += sprintf(buf+len, "RAM Size: %dkb\n", curcard->ramsize);
 		len += sprintf(buf+len, "Cable type: %s\n", (curcard->cabletype)?"STP/DB9":"UTP/RJ-45");
@@ -760,6 +744,10 @@ static struct mca_driver madgemc_driver = {
 
 static int __init madgemc_init (void)
 {
+	madgemc_netdev_ops = tms380tr_netdev_ops;
+	madgemc_netdev_ops.ndo_open = madgemc_open;
+	madgemc_netdev_ops.ndo_stop = madgemc_close;
+
 	return mca_register_driver (&madgemc_driver);
 }
 

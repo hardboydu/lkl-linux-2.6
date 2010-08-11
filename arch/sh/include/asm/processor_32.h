@@ -14,6 +14,7 @@
 #include <asm/page.h>
 #include <asm/types.h>
 #include <asm/ptrace.h>
+#include <asm/hw_breakpoint.h>
 
 /*
  * Default implementation of macro that returns current
@@ -25,8 +26,6 @@
 #define CCN_PVR		0xff000030
 #define CCN_CVR		0xff000040
 #define CCN_PRR		0xff000044
-
-asmlinkage void __init sh_cpu_init(void);
 
 /*
  * User space process size: 2GB.
@@ -56,6 +55,15 @@ asmlinkage void __init sh_cpu_init(void);
 #define SR_DSP		0x00001000
 #define SR_IMASK	0x000000f0
 #define SR_FD		0x00008000
+#define SR_MD		0x40000000
+
+/*
+ * DSP structure and data
+ */
+struct sh_dsp_struct {
+	unsigned long dsp_regs[14];
+	long status;
+};
 
 /*
  * FPU structure and data
@@ -81,9 +89,9 @@ struct sh_fpu_soft_struct {
 	unsigned long entry_pc;
 };
 
-union sh_fpu_union {
-	struct sh_fpu_hard_struct hard;
-	struct sh_fpu_soft_struct soft;
+union thread_xstate {
+	struct sh_fpu_hard_struct hardfpu;
+	struct sh_fpu_soft_struct softfpu;
 };
 
 struct thread_struct {
@@ -91,39 +99,36 @@ struct thread_struct {
 	unsigned long sp;
 	unsigned long pc;
 
-	/* Hardware debugging registers */
-	unsigned long ubc_pc;
+	/* Various thread flags, see SH_THREAD_xxx */
+	unsigned long flags;
 
-	/* floating point info */
-	union sh_fpu_union fpu;
+	/* Save middle states of ptrace breakpoints */
+	struct perf_event *ptrace_bps[HBP_NUM];
+
+#ifdef CONFIG_SH_DSP
+	/* Dsp status information */
+	struct sh_dsp_struct dsp_status;
+#endif
+
+	/* Extended processor state */
+	union thread_xstate *xstate;
 };
-
-/* Count of active tasks with UBC settings */
-extern int ubc_usercnt;
 
 #define INIT_THREAD  {						\
 	.sp = sizeof(init_stack) + (long) &init_stack,		\
+	.flags = 0,						\
 }
-
-/*
- * Do necessary setup to start up a newly executed thread.
- */
-#define start_thread(regs, new_pc, new_sp)	 \
-	set_fs(USER_DS);			 \
-	regs->pr = 0;				 \
-	regs->sr = SR_FD;	/* User mode. */ \
-	regs->pc = new_pc;			 \
-	regs->regs[15] = new_sp
 
 /* Forward declaration, a strange C thing */
 struct task_struct;
-struct mm_struct;
+
+extern void start_thread(struct pt_regs *regs, unsigned long new_pc, unsigned long new_sp);
 
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
 
 /* Prepare to copy thread state - unlazy all lazy status */
-#define prepare_to_copy(tsk)	do { } while (0)
+void prepare_to_copy(struct task_struct *tsk);
 
 /*
  * create a kernel thread without removing it from tasklists
@@ -189,10 +194,9 @@ extern unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk)  (task_pt_regs(tsk)->pc)
 #define KSTK_ESP(tsk)  (task_pt_regs(tsk)->regs[15])
 
-#define user_stack_pointer(regs)	((regs)->regs[15])
+#define user_stack_pointer(_regs)	((_regs)->regs[15])
 
-#if defined(CONFIG_CPU_SH2A) || defined(CONFIG_CPU_SH3) || \
-    defined(CONFIG_CPU_SH4)
+#if defined(CONFIG_CPU_SH2A) || defined(CONFIG_CPU_SH4)
 #define PREFETCH_STRIDE		L1_CACHE_BYTES
 #define ARCH_HAS_PREFETCH
 #define ARCH_HAS_PREFETCHW

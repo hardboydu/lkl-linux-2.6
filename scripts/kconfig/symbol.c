@@ -36,7 +36,7 @@ tristate modules_val;
 
 struct expr *sym_env_list;
 
-void sym_add_default(struct symbol *sym, const char *def)
+static void sym_add_default(struct symbol *sym, const char *def)
 {
 	struct property *prop = prop_alloc(P_DEFAULT, sym);
 
@@ -125,7 +125,7 @@ struct property *sym_get_default_prop(struct symbol *sym)
 	return NULL;
 }
 
-struct property *sym_get_range_prop(struct symbol *sym)
+static struct property *sym_get_range_prop(struct symbol *sym)
 {
 	struct property *prop;
 
@@ -651,12 +651,20 @@ bool sym_is_changable(struct symbol *sym)
 	return sym->visible > sym->rev_dep.tri;
 }
 
+static unsigned strhash(const char *s)
+{
+	/* fnv32 hash */
+	unsigned hash = 2166136261U;
+	for (; *s; s++)
+		hash = (hash ^ *s) * 0x01000193;
+	return hash;
+}
+
 struct symbol *sym_lookup(const char *name, int flags)
 {
 	struct symbol *symbol;
-	const char *ptr;
 	char *new_name;
-	int hash = 0;
+	int hash;
 
 	if (name) {
 		if (name[0] && !name[1]) {
@@ -666,12 +674,11 @@ struct symbol *sym_lookup(const char *name, int flags)
 			case 'n': return &symbol_no;
 			}
 		}
-		for (ptr = name; *ptr; ptr++)
-			hash += *ptr;
-		hash &= 0xff;
+		hash = strhash(name) % SYMBOL_HASHSIZE;
 
 		for (symbol = symbol_hash[hash]; symbol; symbol = symbol->next) {
-			if (!strcmp(symbol->name, name) &&
+			if (symbol->name &&
+			    !strcmp(symbol->name, name) &&
 			    (flags ? symbol->flags & flags
 				   : !(symbol->flags & (SYMBOL_CONST|SYMBOL_CHOICE))))
 				return symbol;
@@ -679,7 +686,7 @@ struct symbol *sym_lookup(const char *name, int flags)
 		new_name = strdup(name);
 	} else {
 		new_name = NULL;
-		hash = 256;
+		hash = 0;
 	}
 
 	symbol = malloc(sizeof(*symbol));
@@ -697,7 +704,6 @@ struct symbol *sym_lookup(const char *name, int flags)
 struct symbol *sym_find(const char *name)
 {
 	struct symbol *symbol = NULL;
-	const char *ptr;
 	int hash = 0;
 
 	if (!name)
@@ -710,12 +716,11 @@ struct symbol *sym_find(const char *name)
 		case 'n': return &symbol_no;
 		}
 	}
-	for (ptr = name; *ptr; ptr++)
-		hash += *ptr;
-	hash &= 0xff;
+	hash = strhash(name) % SYMBOL_HASHSIZE;
 
 	for (symbol = symbol_hash[hash]; symbol; symbol = symbol->next) {
-		if (!strcmp(symbol->name, name) &&
+		if (symbol->name &&
+		    !strcmp(symbol->name, name) &&
 		    !(symbol->flags & SYMBOL_CONST))
 				break;
 	}
@@ -750,6 +755,7 @@ struct symbol **sym_re_search(const char *pattern)
 				return NULL;
 			}
 		}
+		sym_calc_value(sym);
 		sym_arr[cnt++] = sym;
 	}
 	if (sym_arr)
@@ -943,7 +949,7 @@ const char *prop_get_type_name(enum prop_type type)
 	return "unknown";
 }
 
-void prop_add_env(const char *env)
+static void prop_add_env(const char *env)
 {
 	struct symbol *sym, *sym2;
 	struct property *prop;

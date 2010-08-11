@@ -18,6 +18,7 @@
 #include <asm/udbg.h>
 
 void (*udbg_putc)(char c);
+void (*udbg_flush)(void);
 int (*udbg_getc)(void);
 int (*udbg_getc_poll)(void);
 
@@ -59,6 +60,8 @@ void __init udbg_early_init(void)
 	udbg_init_40x_realmode();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_CPM)
 	udbg_init_cpm();
+#elif defined(CONFIG_PPC_EARLY_DEBUG_USBGECKO)
+	udbg_init_usbgecko();
 #endif
 
 #ifdef CONFIG_PPC_EARLY_DEBUG
@@ -76,6 +79,9 @@ void udbg_puts(const char *s)
 			while ((c = *s++) != '\0')
 				udbg_putc(c);
 		}
+
+		if (udbg_flush)
+			udbg_flush();
 	}
 #if 0
 	else {
@@ -97,6 +103,9 @@ int udbg_write(const char *s, int n)
 			udbg_putc(c);
 		}
 	}
+
+	if (udbg_flush)
+		udbg_flush();
 
 	return n - remain;
 }

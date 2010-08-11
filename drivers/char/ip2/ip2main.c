@@ -139,7 +139,7 @@
 #include <linux/seq_file.h>
 
 static const struct file_operations ip2mem_proc_fops;
-static int ip2_read_proc(char *, char **, off_t, int, int *, void * );
+static const struct file_operations ip2_proc_fops;
 
 /********************/
 /* Type Definitions */
@@ -208,6 +208,7 @@ static int DumpFifoBuffer( char __user *, int);
 
 static void ip2_init_board(int, const struct firmware *);
 static unsigned short find_eisa_board(int);
+static int ip2_setup(char *str);
 
 /***************/
 /* Static Data */
@@ -263,7 +264,7 @@ static int tracewrap;
 /* Macros */
 /**********/
 
-#if defined(MODULE) && defined(IP2DEBUG_OPEN)
+#ifdef IP2DEBUG_OPEN
 #define DBG_CNT(s) printk(KERN_DEBUG "(%s): [%x] ttyc=%d, modc=%x -> %s\n", \
 		    tty->name,(pCh->flags), \
 		    tty->count,/*GET_USE_COUNT(module)*/0,s)
@@ -285,7 +286,10 @@ MODULE_AUTHOR("Doug McNash");
 MODULE_DESCRIPTION("Computone IntelliPort Plus Driver");
 MODULE_LICENSE("GPL");
 
+#define	MAX_CMD_STR	50
+
 static int poll_only;
+static char cmd[MAX_CMD_STR];
 
 static int Eisa_irq;
 static int Eisa_slot;
@@ -309,6 +313,8 @@ module_param_array(io, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O ports for IntelliPort Cards");
 module_param(poll_only, bool, 0);
 MODULE_PARM_DESC(poll_only, "Do not use card interrupts");
+module_param_string(ip2, cmd, MAX_CMD_STR, 0);
+MODULE_PARM_DESC(ip2, "Contains module parameter passed with 'ip2='");
 
 /* for sysfs class support */
 static struct class *ip2_class;
@@ -446,9 +452,9 @@ static const struct tty_operations ip2_ops = {
 	.stop            = ip2_stop,
 	.start           = ip2_start,
 	.hangup          = ip2_hangup,
-	.read_proc       = ip2_read_proc,
 	.tiocmget	 = ip2_tiocmget,
 	.tiocmset	 = ip2_tiocmset,
+	.proc_fops	 = &ip2_proc_fops,
 };
 
 /******************************************************************************/
@@ -487,7 +493,6 @@ static const struct firmware *ip2_request_firmware(void)
 	return fw;
 }
 
-#ifndef MODULE
 /******************************************************************************
  *	ip2_setup:
  *		str: kernel command line string
@@ -531,7 +536,6 @@ static int __init ip2_setup(char *str)
 	return 1;
 }
 __setup("ip2=", ip2_setup);
-#endif /* !MODULE */
 
 static int __init ip2_loadmain(void)
 {
@@ -539,13 +543,19 @@ static int __init ip2_loadmain(void)
 	int err = 0;
 	i2eBordStrPtr pB = NULL;
 	int rc = -1;
-	struct pci_dev *pdev = NULL;
 	const struct firmware *fw = NULL;
+	char *str;
+
+	str = cmd;
 
 	if (poll_only) {
 		/* Hard lock the interrupts to zero */
 		irq[0] = irq[1] = irq[2] = irq[3] = poll_only = 0;
 	}
+
+	/* Check module parameter with 'ip2=' has been passed or not */
+	if (!poll_only && (!strncmp(str, "ip2=", 4)))
+		ip2_setup(str);
 
 	ip2trace(ITRC_NO_PORT, ITRC_INIT, ITRC_ENTER, 0);
 
@@ -612,6 +622,7 @@ static int __init ip2_loadmain(void)
 		case PCI:
 #ifdef CONFIG_PCI
 		{
+			struct pci_dev *pdev = NULL;
 			u32 addr;
 			int status;
 
@@ -626,7 +637,7 @@ static int __init ip2_loadmain(void)
 
 			if (pci_enable_device(pdev)) {
 				dev_err(&pdev->dev, "can't enable device\n");
-				break;
+				goto out;
 			}
 			ip2config.type[i] = PCI;
 			ip2config.pci_dev[i] = pci_dev_get(pdev);
@@ -638,6 +649,8 @@ static int __init ip2_loadmain(void)
 				dev_err(&pdev->dev, "I/O address error\n");
 
 			ip2config.irq[i] = pdev->irq;
+out:
+			pci_dev_put(pdev);
 		}
 #else
 			printk(KERN_ERR "IP2: PCI card specified but PCI "
@@ -656,7 +669,6 @@ static int __init ip2_loadmain(void)
 			break;
 		}	/* switch */
 	}	/* for */
-	pci_dev_put(pdev);
 
 	for (i = 0; i < IP2_MAX_BOARDS; ++i) {
 		if (ip2config.addr[i]) {
@@ -1315,8 +1327,8 @@ static inline void  isig(int sig, struct tty_struct *tty, int flush)
 	if (tty->pgrp)
 		kill_pgrp(tty->pgrp, sig, 1);
 	if (flush || !L_NOFLSH(tty)) {
-		if ( tty->ldisc.ops->flush_buffer )  
-			tty->ldisc.ops->flush_buffer(tty);
+		if ( tty->ldisc->ops->flush_buffer )  
+			tty->ldisc->ops->flush_buffer(tty);
 		i2InputFlush( tty->driver_data );
 	}
 }
@@ -3029,19 +3041,17 @@ static const struct file_operations ip2mem_proc_fops = {
  * different sources including ip2mkdev.c and a couple of other drivers.
  * The bugs are all mine.  :-)	=mhw=
  */
-static int ip2_read_proc(char *page, char **start, off_t off,
-				int count, int *eof, void *data)
+static int ip2_proc_show(struct seq_file *m, void *v)
 {
 	int	i, j, box;
-	int	len = 0;
 	int	boxes = 0;
 	int	ports = 0;
 	int	tports = 0;
-	off_t	begin = 0;
 	i2eBordStrPtr  pB;
+	char *sep;
 
-	len += sprintf(page, "ip2info: 1.0 driver: %s\n", pcVersion );
-	len += sprintf(page+len, "Driver: SMajor=%d CMajor=%d IMajor=%d MaxBoards=%d MaxBoxes=%d MaxPorts=%d\n",
+	seq_printf(m, "ip2info: 1.0 driver: %s\n", pcVersion);
+	seq_printf(m, "Driver: SMajor=%d CMajor=%d IMajor=%d MaxBoards=%d MaxBoxes=%d MaxPorts=%d\n",
 			IP2_TTY_MAJOR, IP2_CALLOUT_MAJOR, IP2_IPL_MAJOR,
 			IP2_MAX_BOARDS, ABS_MAX_BOXES, ABS_BIGGEST_BOX);
 
@@ -3053,7 +3063,8 @@ static int ip2_read_proc(char *page, char **start, off_t off,
 			switch( pB->i2ePom.e.porID & ~POR_ID_RESERVED ) 
 			{
 			case POR_ID_FIIEX:
-				len += sprintf( page+len, "Board %d: EX ports=", i );
+				seq_printf(m, "Board %d: EX ports=", i);
+				sep = "";
 				for( box = 0; box < ABS_MAX_BOXES; ++box )
 				{
 					ports = 0;
@@ -3065,79 +3076,74 @@ static int ip2_read_proc(char *page, char **start, off_t off,
 							++ports;
 						}
 					}
-					len += sprintf( page+len, "%d,", ports );
+					seq_printf(m, "%s%d", sep, ports);
+					sep = ",";
 					tports += ports;
 				}
-
-				--len;	/* Backup over that last comma */
-
-				len += sprintf( page+len, " boxes=%d width=%d", boxes, pB->i2eDataWidth16 ? 16 : 8 );
+				seq_printf(m, " boxes=%d width=%d", boxes, pB->i2eDataWidth16 ? 16 : 8);
 				break;
 
 			case POR_ID_II_4:
-				len += sprintf(page+len, "Board %d: ISA-4 ports=4 boxes=1", i );
+				seq_printf(m, "Board %d: ISA-4 ports=4 boxes=1", i);
 				tports = ports = 4;
 				break;
 
 			case POR_ID_II_8:
-				len += sprintf(page+len, "Board %d: ISA-8-std ports=8 boxes=1", i );
+				seq_printf(m, "Board %d: ISA-8-std ports=8 boxes=1", i);
 				tports = ports = 8;
 				break;
 
 			case POR_ID_II_8R:
-				len += sprintf(page+len, "Board %d: ISA-8-RJ11 ports=8 boxes=1", i );
+				seq_printf(m, "Board %d: ISA-8-RJ11 ports=8 boxes=1", i);
 				tports = ports = 8;
 				break;
 
 			default:
-				len += sprintf(page+len, "Board %d: unknown", i );
+				seq_printf(m, "Board %d: unknown", i);
 				/* Don't try and probe for minor numbers */
 				tports = ports = 0;
 			}
 
 		} else {
 			/* Don't try and probe for minor numbers */
-			len += sprintf(page+len, "Board %d: vacant", i );
+			seq_printf(m, "Board %d: vacant", i);
 			tports = ports = 0;
 		}
 
 		if( tports ) {
-			len += sprintf(page+len, " minors=" );
-
+			seq_puts(m, " minors=");
+			sep = "";
 			for ( box = 0; box < ABS_MAX_BOXES; ++box )
 			{
 				for ( j = 0; j < ABS_BIGGEST_BOX; ++j )
 				{
 					if ( pB->i2eChannelMap[box] & (1 << j) )
 					{
-						len += sprintf (page+len,"%d,",
+						seq_printf(m, "%s%d", sep,
 							j + ABS_BIGGEST_BOX *
 							(box+i*ABS_MAX_BOXES));
+						sep = ",";
 					}
 				}
 			}
-
-			page[ len - 1 ] = '\n';	/* Overwrite that last comma */
-		} else {
-			len += sprintf (page+len,"\n" );
 		}
-
-		if (len+begin > off+count)
-			break;
-		if (len+begin < off) {
-			begin += len;
-			len = 0;
-		}
+		seq_putc(m, '\n');
 	}
-
-	if (i >= IP2_MAX_BOARDS)
-		*eof = 1;
-	if (off >= len+begin)
-		return 0;
-
-	*start = page + (off-begin);
-	return ((count < begin+len-off) ? count : begin+len-off);
+	return 0;
  }
+
+static int ip2_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ip2_proc_show, NULL);
+}
+
+static const struct file_operations ip2_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= ip2_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
  
 /******************************************************************************/
 /* Function:   ip2trace()                                                     */
@@ -3203,3 +3209,5 @@ static struct pci_device_id ip2main_pci_tbl[] __devinitdata = {
 };
 
 MODULE_DEVICE_TABLE(pci, ip2main_pci_tbl);
+
+MODULE_FIRMWARE("intelliport2.bin");

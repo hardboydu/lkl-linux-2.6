@@ -125,7 +125,7 @@
    0 - no debugging messages
    1 - some debugging messages, but none during DMA frame transmission
    2 - lots of messages, including during DMA frame transmission
-       (will cause undeflows if your machine is too slow!)
+       (will cause underflows if your machine is too slow!)
 */
 
 #define DV1394_DEBUG_LEVEL 0
@@ -1325,11 +1325,7 @@ static int dv1394_fasync(int fd, struct file *file, int on)
 
 	struct video_card *video = file_to_video_card(file);
 
-	int retval = fasync_helper(fd, file, on, &video->fasync);
-
-	if (retval < 0)
-		return retval;
-        return 0;
+	return fasync_helper(fd, file, on, &video->fasync);
 }
 
 static ssize_t dv1394_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos)
@@ -1793,12 +1789,13 @@ static int dv1394_open(struct inode *inode, struct file *file)
 	} else {
 		/* look up the card by ID */
 		unsigned long flags;
+		int idx = ieee1394_file_to_instance(file);
 
 		spin_lock_irqsave(&dv1394_cards_lock, flags);
 		if (!list_empty(&dv1394_cards)) {
 			struct video_card *p;
 			list_for_each_entry(p, &dv1394_cards, list) {
-				if ((p->id) == ieee1394_file_to_instance(file)) {
+				if ((p->id) == idx) {
 					video = p;
 					break;
 				}
@@ -1807,7 +1804,7 @@ static int dv1394_open(struct inode *inode, struct file *file)
 		spin_unlock_irqrestore(&dv1394_cards_lock, flags);
 
 		if (!video) {
-			debug_printk("dv1394: OHCI card %d not found", ieee1394_file_to_instance(file));
+			debug_printk("dv1394: OHCI card %d not found", idx);
 			return -ENODEV;
 		}
 
@@ -1827,7 +1824,7 @@ static int dv1394_open(struct inode *inode, struct file *file)
 	       "and will not be available in the new firewire driver stack. "
 	       "Try libraw1394 based programs instead.\n", current->comm);
 
-	return 0;
+	return nonseekable_open(inode, file);
 }
 
 
@@ -2156,17 +2153,18 @@ static struct cdev dv1394_cdev;
 static const struct file_operations dv1394_fops=
 {
 	.owner =	THIS_MODULE,
-	.poll =         dv1394_poll,
+	.poll =		dv1394_poll,
 	.unlocked_ioctl = dv1394_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = dv1394_compat_ioctl,
 #endif
 	.mmap =		dv1394_mmap,
 	.open =		dv1394_open,
-	.write =        dv1394_write,
-	.read =         dv1394_read,
+	.write =	dv1394_write,
+	.read =		dv1394_read,
 	.release =	dv1394_release,
-	.fasync =       dv1394_fasync,
+	.fasync =	dv1394_fasync,
+	.llseek =	no_llseek,
 };
 
 
@@ -2175,7 +2173,7 @@ static const struct file_operations dv1394_fops=
  * Export information about protocols/devices supported by this driver.
  */
 #ifdef MODULE
-static struct ieee1394_device_id dv1394_id_table[] = {
+static const struct ieee1394_device_id dv1394_id_table[] = {
 	{
 		.match_flags	= IEEE1394_MATCH_SPECIFIER_ID | IEEE1394_MATCH_VERSION,
 		.specifier_id	= AVC_UNIT_SPEC_ID_ENTRY & 0xffffff,

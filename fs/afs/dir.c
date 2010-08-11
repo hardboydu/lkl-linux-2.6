@@ -12,7 +12,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/ctype.h>
@@ -62,7 +61,7 @@ const struct inode_operations afs_dir_inode_operations = {
 	.setattr	= afs_setattr,
 };
 
-static struct dentry_operations afs_fs_dentry_operations = {
+static const struct dentry_operations afs_fs_dentry_operations = {
 	.d_revalidate	= afs_d_revalidate,
 	.d_delete	= afs_d_delete,
 	.d_release	= afs_d_release,
@@ -190,13 +189,9 @@ static struct page *afs_dir_get_page(struct inode *dir, unsigned long index,
 				     struct key *key)
 {
 	struct page *page;
-	struct file file = {
-		.private_data = key,
-	};
-
 	_enter("{%lu},%lu", dir->i_ino, index);
 
-	page = read_mapping_page(dir->i_mapping, index, &file);
+	page = read_cache_page(dir->i_mapping, index, afs_page_filler, key);
 	if (!IS_ERR(page)) {
 		kmap(page);
 		if (!PageChecked(page))
@@ -564,7 +559,7 @@ static struct dentry *afs_lookup(struct inode *dir, struct dentry *dentry,
 static int afs_d_revalidate(struct dentry *dentry, struct nameidata *nd)
 {
 	struct afs_vnode *vnode, *dir;
-	struct afs_fid fid;
+	struct afs_fid uninitialized_var(fid);
 	struct dentry *parent;
 	struct key *key;
 	void *dir_version;

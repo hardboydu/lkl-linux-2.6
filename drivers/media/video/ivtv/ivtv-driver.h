@@ -53,6 +53,7 @@
 #include <linux/scatterlist.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
@@ -62,8 +63,10 @@
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-fh.h>
 #include <media/tuner.h>
 #include <media/cx2341x.h>
+#include <media/ir-kbd-i2c.h>
 
 #include <linux/ivtv.h>
 
@@ -114,6 +117,9 @@
 #define IVTV_REG_VPU 			(0x9058)
 #define IVTV_REG_APU 			(0xA064)
 
+/* Other registers */
+#define IVTV_REG_DEC_LINE_FIELD		(0x28C0)
+
 /* debugging */
 extern int ivtv_debug;
 
@@ -133,7 +139,7 @@ extern int ivtv_debug;
 #define IVTV_DEBUG(x, type, fmt, args...) \
 	do { \
 		if ((x) & ivtv_debug) \
-			v4l2_info(&itv->device, " " type ": " fmt , ##args);	\
+			v4l2_info(&itv->v4l2_dev, " " type ": " fmt , ##args);	\
 	} while (0)
 #define IVTV_DEBUG_WARN(fmt, args...)  IVTV_DEBUG(IVTV_DBGFLG_WARN,  "warn",  fmt , ## args)
 #define IVTV_DEBUG_INFO(fmt, args...)  IVTV_DEBUG(IVTV_DBGFLG_INFO,  "info",  fmt , ## args)
@@ -149,7 +155,7 @@ extern int ivtv_debug;
 #define IVTV_DEBUG_HIGH_VOL(x, type, fmt, args...) \
 	do { \
 		if (((x) & ivtv_debug) && (ivtv_debug & IVTV_DBGFLG_HIGHVOL)) 	\
-			v4l2_info(&itv->device, " " type ": " fmt , ##args);	\
+			v4l2_info(&itv->v4l2_dev, " " type ": " fmt , ##args);	\
 	} while (0)
 #define IVTV_DEBUG_HI_WARN(fmt, args...)  IVTV_DEBUG_HIGH_VOL(IVTV_DBGFLG_WARN,  "warn",  fmt , ## args)
 #define IVTV_DEBUG_HI_INFO(fmt, args...)  IVTV_DEBUG_HIGH_VOL(IVTV_DBGFLG_INFO,  "info",  fmt , ## args)
@@ -163,9 +169,9 @@ extern int ivtv_debug;
 #define IVTV_DEBUG_HI_YUV(fmt, args...)   IVTV_DEBUG_HIGH_VOL(IVTV_DBGFLG_YUV,   "yuv",   fmt , ## args)
 
 /* Standard kernel messages */
-#define IVTV_ERR(fmt, args...)      v4l2_err(&itv->device, fmt , ## args)
-#define IVTV_WARN(fmt, args...)     v4l2_warn(&itv->device, fmt , ## args)
-#define IVTV_INFO(fmt, args...)     v4l2_info(&itv->device, fmt , ## args)
+#define IVTV_ERR(fmt, args...)      v4l2_err(&itv->v4l2_dev, fmt , ## args)
+#define IVTV_WARN(fmt, args...)     v4l2_warn(&itv->v4l2_dev, fmt , ## args)
+#define IVTV_INFO(fmt, args...)     v4l2_info(&itv->v4l2_dev, fmt , ## args)
 
 /* output modes (cx23415 only) */
 #define OUT_NONE        0
@@ -176,12 +182,16 @@ extern int ivtv_debug;
 
 #define IVTV_MAX_PGM_INDEX (400)
 
+/* Default I2C SCL period in microseconds */
+#define IVTV_DEFAULT_I2C_CLOCK_PERIOD	20
+
 struct ivtv_options {
 	int kilobytes[IVTV_MAX_STREAMS];        /* size in kilobytes of each stream */
 	int cardtype;				/* force card type on load */
 	int tuner;				/* set tuner on load */
 	int radio;				/* enable/disable radio */
 	int newi2c;				/* new I2C algorithm */
+	int i2c_clock_period;			/* period of SCL for I2C bus */
 };
 
 /* ivtv-specific mailbox template */
@@ -315,7 +325,7 @@ struct ivtv;				/* forward reference */
 struct ivtv_stream {
 	/* These first four fields are always set, even if the stream
 	   is not actually created. */
-	struct video_device *v4l2dev;	/* NULL when stream not created */
+	struct video_device *vdev;	/* NULL when stream not created */
 	struct ivtv *itv; 		/* for ease of use */
 	const char *name;		/* name of the stream */
 	int type;			/* stream type */
@@ -366,12 +376,18 @@ struct ivtv_stream {
 };
 
 struct ivtv_open_id {
+	struct v4l2_fh fh;
 	u32 open_id;                    /* unique ID for this file descriptor */
 	int type;                       /* stream type */
 	int yuv_frames;                 /* 1: started OUT_UDMA_YUV output mode */
 	enum v4l2_priority prio;        /* priority */
 	struct ivtv *itv;
 };
+
+static inline struct ivtv_open_id *fh2id(struct v4l2_fh *fh)
+{
+	return container_of(fh, struct ivtv_open_id, fh);
+}
 
 struct yuv_frame_info
 {
@@ -592,7 +608,7 @@ struct ivtv_card;
 /* Struct to hold info about ivtv cards */
 struct ivtv {
 	/* General fixed card data */
-	struct pci_dev *dev;		/* PCI device */
+	struct pci_dev *pdev;		/* PCI device */
 	const struct ivtv_card *card;	/* card information */
 	const char *card_name;          /* full name of the card */
 	const struct ivtv_card_tuner_i2c *card_i2c; /* i2c addresses to probe for tuner */
@@ -612,7 +628,7 @@ struct ivtv {
 	volatile void __iomem *reg_mem; /* pointer to mapped registers */
 	struct ivtv_options options; 	/* user options */
 
-	struct v4l2_device device;
+	struct v4l2_device v4l2_dev;
 	struct v4l2_subdev sd_gpio;	/* GPIO sub-device */
 	u16 instance;
 
@@ -677,6 +693,7 @@ struct ivtv {
 	int i2c_state;                  /* i2c bit state */
 	struct mutex i2c_bus_lock;      /* lock i2c bus */
 
+	struct IR_i2c_init_data ir_i2c_init_data;
 
 	/* Program Index information */
 	u32 pgm_info_offset;            /* start of pgm info in encoder memory */
@@ -696,7 +713,7 @@ struct ivtv {
 	u64 vbi_data_inserted;          /* number of VBI bytes inserted into the MPEG stream */
 	u32 last_dec_timing[3];         /* cache last retrieved pts/scr/frame values */
 	unsigned long dualwatch_jiffies;/* jiffies value of the previous dualwatch check */
-	u16 dualwatch_stereo_mode;      /* current detected dualwatch stereo mode */
+	u32 dualwatch_stereo_mode;      /* current detected dualwatch stereo mode */
 
 
 	/* VBI state info */
@@ -719,9 +736,9 @@ struct ivtv {
 	struct osd_info *osd_info;      /* ivtvfb private OSD info */
 };
 
-static inline struct ivtv *to_ivtv(struct v4l2_device *dev)
+static inline struct ivtv *to_ivtv(struct v4l2_device *v4l2_dev)
 {
-	return container_of(dev, struct ivtv, device);
+	return container_of(v4l2_dev, struct ivtv, v4l2_dev);
 }
 
 /* Globals */
@@ -788,7 +805,7 @@ static inline int ivtv_raw_vbi(const struct ivtv *itv)
 /* Call the specified callback for all subdevs matching hw (if 0, then
    match them all). Ignore any errors. */
 #define ivtv_call_hw(itv, hw, o, f, args...) 				\
-	__v4l2_device_call_subdevs(&(itv)->device, !(hw) || (sd->grp_id & (hw)), o, f , ##args)
+	__v4l2_device_call_subdevs(&(itv)->v4l2_dev, !(hw) || (sd->grp_id & (hw)), o, f , ##args)
 
 #define ivtv_call_all(itv, o, f, args...) ivtv_call_hw(itv, 0, o, f , ##args)
 
@@ -796,7 +813,7 @@ static inline int ivtv_raw_vbi(const struct ivtv *itv)
    match them all). If the callback returns an error other than 0 or
    -ENOIOCTLCMD, then return with that error code. */
 #define ivtv_call_hw_err(itv, hw, o, f, args...)  		\
-	__v4l2_device_call_subdevs_until_err(&(itv)->device, !(hw) || (sd->grp_id & (hw)), o, f , ##args)
+	__v4l2_device_call_subdevs_until_err(&(itv)->v4l2_dev, !(hw) || (sd->grp_id & (hw)), o, f , ##args)
 
 #define ivtv_call_all_err(itv, o, f, args...) ivtv_call_hw_err(itv, 0, o, f , ##args)
 

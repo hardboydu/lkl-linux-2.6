@@ -98,12 +98,6 @@ struct dataflash {
 	struct mtd_info		mtd;
 };
 
-#ifdef CONFIG_MTD_PARTITIONS
-#define	mtd_has_partitions()	(1)
-#else
-#define	mtd_has_partitions()	(0)
-#endif
-
 /* ......................................................................... */
 
 /*
@@ -184,7 +178,7 @@ static int dataflash_erase(struct mtd_info *mtd, struct erase_info *instr)
 		/* Calculate flash page address; use block erase (for speed) if
 		 * we're at a block boundary and need to erase the whole block.
 		 */
-		pageaddr = div_u64(instr->len, priv->page_size);
+		pageaddr = div_u64(instr->addr, priv->page_size);
 		do_block = (pageaddr & 0x7) == 0 && instr->len >= blocksize;
 		pageaddr = pageaddr << priv->page_offset;
 
@@ -407,7 +401,7 @@ static int dataflash_write(struct mtd_info *mtd, loff_t to, size_t len,
 		(void) dataflash_waitready(priv->spi);
 
 
-#ifdef CONFIG_MTD_DATAFLASH_VERIFY_WRITE
+#ifdef CONFIG_MTD_DATAFLASH_WRITE_VERIFY
 
 		/* (3) Compare to Buffer1 */
 		addr = pageaddr << priv->page_offset;
@@ -436,7 +430,7 @@ static int dataflash_write(struct mtd_info *mtd, loff_t to, size_t len,
 		} else
 			status = 0;
 
-#endif	/* CONFIG_MTD_DATAFLASH_VERIFY_WRITE */
+#endif	/* CONFIG_MTD_DATAFLASH_WRITE_VERIFY */
 
 		remaining = remaining - writelen;
 		pageaddr++;
@@ -642,6 +636,7 @@ add_dataflash_otp(struct spi_device *spi, char *name,
 	struct mtd_info			*device;
 	struct flash_platform_data	*pdata = spi->dev.platform_data;
 	char				*otp_tag = "";
+	int				err = 0;
 
 	priv = kzalloc(sizeof *priv, GFP_KERNEL);
 	if (!priv)
@@ -670,6 +665,8 @@ add_dataflash_otp(struct spi_device *spi, char *name,
 	device->write = dataflash_write;
 	device->priv = priv;
 
+	device->dev.parent = &spi->dev;
+
 	if (revision >= 'c')
 		otp_tag = otp_setup(device, revision);
 
@@ -682,11 +679,13 @@ add_dataflash_otp(struct spi_device *spi, char *name,
 		struct mtd_partition	*parts;
 		int			nr_parts = 0;
 
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-		static const char *part_probes[] = { "cmdlinepart", NULL, };
+		if (mtd_has_cmdlinepart()) {
+			static const char *part_probes[]
+					= { "cmdlinepart", NULL, };
 
-		nr_parts = parse_mtd_partitions(device, part_probes, &parts, 0);
-#endif
+			nr_parts = parse_mtd_partitions(device,
+					part_probes, &parts, 0);
+		}
 
 		if (nr_parts <= 0 && pdata && pdata->parts) {
 			parts = pdata->parts;
@@ -695,13 +694,23 @@ add_dataflash_otp(struct spi_device *spi, char *name,
 
 		if (nr_parts > 0) {
 			priv->partitioned = 1;
-			return add_mtd_partitions(device, parts, nr_parts);
+			err = add_mtd_partitions(device, parts, nr_parts);
+			goto out;
 		}
 	} else if (pdata && pdata->nr_parts)
 		dev_warn(&spi->dev, "ignoring %d default partitions on %s\n",
 				pdata->nr_parts, device->name);
 
-	return add_mtd_device(device) == 1 ? -ENODEV : 0;
+	if (add_mtd_device(device) == 1)
+		err = -ENODEV;
+
+out:
+	if (!err)
+		return 0;
+
+	dev_set_drvdata(&spi->dev, NULL);
+	kfree(priv);
+	return err;
 }
 
 static inline int __devinit
@@ -934,8 +943,10 @@ static int __devexit dataflash_remove(struct spi_device *spi)
 		status = del_mtd_partitions(&flash->mtd);
 	else
 		status = del_mtd_device(&flash->mtd);
-	if (status == 0)
+	if (status == 0) {
+		dev_set_drvdata(&spi->dev, NULL);
 		kfree(flash);
+	}
 	return status;
 }
 
@@ -968,3 +979,4 @@ module_exit(dataflash_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrew Victor, David Brownell");
 MODULE_DESCRIPTION("MTD DataFlash driver");
+MODULE_ALIAS("spi:mtd_dataflash");

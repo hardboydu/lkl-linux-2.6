@@ -21,11 +21,10 @@
 
 #include <pcmcia/ss.h>
 
-#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/irq.h>
 
-#include <mach/pxa-regs.h>
+#include <mach/pxa2xx-regs.h>
 #include <mach/mainstone.h>
 
 #include "soc_common.h"
@@ -45,7 +44,7 @@ static int mst_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 	 * before we enable them as outputs.
 	 */
 
-	skt->irq = (skt->nr == 0) ? MAINSTONE_S0_IRQ : MAINSTONE_S1_IRQ;
+	skt->socket.pci_irq = (skt->nr == 0) ? MAINSTONE_S0_IRQ : MAINSTONE_S1_IRQ;
 	return soc_pcmcia_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 

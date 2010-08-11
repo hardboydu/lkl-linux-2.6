@@ -42,6 +42,7 @@
 #include <linux/kernel.h>
 #include <linux/mca.h>
 #include <linux/kprobes.h>
+#include <linux/slab.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <linux/proc_fs.h>
@@ -51,7 +52,6 @@
 #include <linux/ioport.h>
 #include <asm/uaccess.h>
 #include <linux/init.h>
-#include <asm/arch_hooks.h>
 
 static unsigned char which_scsi;
 
@@ -474,6 +474,4 @@ void __kprobes mca_handle_nmi(void)
 	 * adapter was responsible for the error.
 	 */
 	bus_for_each_dev(&mca_bus_type, NULL, NULL, mca_handle_nmi_callback);
-
-	mca_nmi_hook();
-} /* mca_handle_nmi */
+}

@@ -21,7 +21,7 @@
 #include <linux/hardirq.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
-#include <linux/utsrelease.h>
+#include <generated/utsrelease.h>
 #include <linux/utsname.h>
 #include <linux/numa.h>
 #include <linux/suspend.h>
@@ -31,6 +31,8 @@
 #include <linux/cpu.h>
 #include <linux/console.h>
 #include <linux/vmalloc.h>
+#include <linux/swap.h>
+#include <linux/kmsg_dump.h>
 
 #include <asm/page.h>
 #include <asm/uaccess.h>
@@ -39,10 +41,10 @@
 #include <asm/sections.h>
 
 /* Per cpu memory for storing cpu states in case of system crash. */
-note_buf_t* crash_notes;
+note_buf_t __percpu *crash_notes;
 
 /* vmcoreinfo stuff */
-unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
+static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
 u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 size_t vmcoreinfo_size;
 size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
@@ -1073,6 +1075,9 @@ void crash_kexec(struct pt_regs *regs)
 	if (mutex_trylock(&kexec_mutex)) {
 		if (kexec_crash_image) {
 			struct pt_regs fixed_regs;
+
+			kmsg_dump(KMSG_DUMP_KEXEC);
+
 			crash_setup_regs(&fixed_regs, regs);
 			crash_save_vmcoreinfo();
 			machine_crash_shutdown(&fixed_regs);
@@ -1080,6 +1085,63 @@ void crash_kexec(struct pt_regs *regs)
 		}
 		mutex_unlock(&kexec_mutex);
 	}
+}
+
+size_t crash_get_memory_size(void)
+{
+	size_t size = 0;
+	mutex_lock(&kexec_mutex);
+	if (crashk_res.end != crashk_res.start)
+		size = crashk_res.end - crashk_res.start + 1;
+	mutex_unlock(&kexec_mutex);
+	return size;
+}
+
+static void free_reserved_phys_range(unsigned long begin, unsigned long end)
+{
+	unsigned long addr;
+
+	for (addr = begin; addr < end; addr += PAGE_SIZE) {
+		ClearPageReserved(pfn_to_page(addr >> PAGE_SHIFT));
+		init_page_count(pfn_to_page(addr >> PAGE_SHIFT));
+		free_page((unsigned long)__va(addr));
+		totalram_pages++;
+	}
+}
+
+int crash_shrink_memory(unsigned long new_size)
+{
+	int ret = 0;
+	unsigned long start, end;
+
+	mutex_lock(&kexec_mutex);
+
+	if (kexec_crash_image) {
+		ret = -ENOENT;
+		goto unlock;
+	}
+	start = crashk_res.start;
+	end = crashk_res.end;
+
+	if (new_size >= end - start + 1) {
+		ret = -EINVAL;
+		if (new_size == end - start + 1)
+			ret = 0;
+		goto unlock;
+	}
+
+	start = roundup(start, PAGE_SIZE);
+	end = roundup(start + new_size, PAGE_SIZE);
+
+	free_reserved_phys_range(end, crashk_res.end);
+
+	if ((start == end) && (crashk_res.parent != NULL))
+		release_resource(&crashk_res);
+	crashk_res.end = end - 1;
+
+unlock:
+	mutex_unlock(&kexec_mutex);
+	return ret;
 }
 
 static u32 *append_elf_note(u32 *buf, char *name, unsigned type, void *data,
@@ -1130,7 +1192,7 @@ void crash_save_cpu(struct pt_regs *regs, int cpu)
 		return;
 	memset(&prstatus, 0, sizeof(prstatus));
 	prstatus.pr_pid = current->pid;
-	elf_core_copy_regs(&prstatus.pr_reg, regs);
+	elf_core_copy_kernel_regs(&prstatus.pr_reg, regs);
 	buf = append_elf_note(buf, KEXEC_CORE_NOTE_NAME, NT_PRSTATUS,
 		      	      &prstatus, sizeof(prstatus));
 	final_note(buf);
@@ -1228,7 +1290,7 @@ static int __init parse_crashkernel_mem(char 			*cmdline,
 	} while (*cur++ == ',');
 
 	if (*crash_size > 0) {
-		while (*cur != ' ' && *cur != '@')
+		while (*cur && *cur != ' ' && *cur != '@')
 			cur++;
 		if (*cur == '@') {
 			cur++;
@@ -1409,6 +1471,7 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_OFFSET(list_head, prev);
 	VMCOREINFO_OFFSET(vm_struct, addr);
 	VMCOREINFO_LENGTH(zone.free_area, MAX_ORDER);
+	log_buf_kexec_setup();
 	VMCOREINFO_LENGTH(free_area.free_list, MIGRATE_TYPES);
 	VMCOREINFO_NUMBER(NR_FREE_PAGES);
 	VMCOREINFO_NUMBER(PG_lru);
@@ -1447,29 +1510,27 @@ int kernel_kexec(void)
 			goto Restore_console;
 		}
 		suspend_console();
-		error = device_suspend(PMSG_FREEZE);
+		error = dpm_suspend_start(PMSG_FREEZE);
 		if (error)
 			goto Resume_console;
-		error = disable_nonboot_cpus();
-		if (error)
-			goto Resume_devices;
-		device_pm_lock();
-		local_irq_disable();
-		/* At this point, device_suspend() has been called,
-		 * but *not* device_power_down(). We *must*
-		 * device_power_down() now.  Otherwise, drivers for
+		/* At this point, dpm_suspend_start() has been called,
+		 * but *not* dpm_suspend_noirq(). We *must* call
+		 * dpm_suspend_noirq() now.  Otherwise, drivers for
 		 * some devices (e.g. interrupt controllers) become
 		 * desynchronized with the actual state of the
 		 * hardware at resume time, and evil weirdness ensues.
 		 */
-		error = device_power_down(PMSG_FREEZE);
+		error = dpm_suspend_noirq(PMSG_FREEZE);
 		if (error)
-			goto Enable_irqs;
-
+			goto Resume_devices;
+		error = disable_nonboot_cpus();
+		if (error)
+			goto Enable_cpus;
+		local_irq_disable();
 		/* Suspend system devices */
 		error = sysdev_suspend(PMSG_FREEZE);
 		if (error)
-			goto Power_up_devices;
+			goto Enable_irqs;
 	} else
 #endif
 	{
@@ -1483,14 +1544,13 @@ int kernel_kexec(void)
 #ifdef CONFIG_KEXEC_JUMP
 	if (kexec_image->preserve_context) {
 		sysdev_resume();
- Power_up_devices:
-		device_power_up(PMSG_RESTORE);
  Enable_irqs:
 		local_irq_enable();
-		device_pm_unlock();
+ Enable_cpus:
 		enable_nonboot_cpus();
+		dpm_resume_noirq(PMSG_RESTORE);
  Resume_devices:
-		device_resume(PMSG_RESTORE);
+		dpm_resume_end(PMSG_RESTORE);
  Resume_console:
 		resume_console();
 		thaw_processes();

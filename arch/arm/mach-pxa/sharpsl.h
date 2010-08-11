@@ -7,30 +7,7 @@
  *
  */
 
-#include <asm/hardware/sharpsl_pm.h>
-
-/*
- * SharpSL SSP Driver
- */
-struct corgissp_machinfo {
-	int port;
-	int cs_lcdcon;
-	int cs_ads7846;
-	int cs_max1111;
-	int clk_lcdcon;
-	int clk_ads7846;
-	int clk_max1111;
-};
-
-void corgi_ssp_set_machinfo(struct corgissp_machinfo *machinfo);
-
-
-/*
- * SharpSL/Corgi LCD Driver
- */
-void corgi_lcdtg_suspend(void);
-void corgi_lcdtg_hw_init(int mode);
-
+#include <mach/sharpsl_pm.h>
 
 /*
  * SharpSL Battery/PM Driver
@@ -42,10 +19,8 @@ void corgi_lcdtg_hw_init(int mode);
 #define MAX1111_BATT_TEMP   2u
 #define MAX1111_ACIN_VOLT   6u
 
-extern struct battery_thresh spitz_battery_levels_acin[];
-extern struct battery_thresh spitz_battery_levels_noac[];
-void sharpsl_pm_pxa_init(void);
-void sharpsl_pm_pxa_remove(void);
+extern struct battery_thresh sharpsl_battery_levels_acin[];
+extern struct battery_thresh sharpsl_battery_levels_noac[];
 int sharpsl_pm_pxa_read_max1111(int channel);
 
 

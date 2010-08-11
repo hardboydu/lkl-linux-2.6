@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -25,6 +24,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/gfp.h>
 
 #include <asm/auxio.h>
 #include <asm/byteorder.h>
@@ -362,7 +362,7 @@ static void bigmac_tcvr_write(struct bigmac *bp, void __iomem *tregs,
 	default:
 		printk(KERN_ERR "bigmac_tcvr_read: Whoops, no known transceiver type.\n");
 		return;
-	};
+	}
 
 	idle_transceiver(tregs);
 	write_tcvr_bit(bp, tregs, 0);
@@ -401,7 +401,7 @@ static unsigned short bigmac_tcvr_read(struct bigmac *bp,
 	default:
 		printk(KERN_ERR "bigmac_tcvr_read: Whoops, no known transceiver type.\n");
 		return 0xffff;
-	};
+	}
 
 	idle_transceiver(tregs);
 	write_tcvr_bit(bp, tregs, 0);
@@ -919,7 +919,7 @@ static int bigmac_open(struct net_device *dev)
 	struct bigmac *bp = netdev_priv(dev);
 	int ret;
 
-	ret = request_irq(dev->irq, &bigmac_interrupt, IRQF_SHARED, dev->name, bp);
+	ret = request_irq(dev->irq, bigmac_interrupt, IRQF_SHARED, dev->name, bp);
 	if (ret) {
 		printk(KERN_ERR "BIGMAC: Can't order irq %d to go.\n", dev->irq);
 		return ret;
@@ -982,9 +982,7 @@ static int bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	sbus_writel(CREG_CTRL_TWAKEUP, bp->creg + CREG_CTRL);
 
 
-	dev->trans_start = jiffies;
-
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
@@ -999,7 +997,7 @@ static void bigmac_set_multicast(struct net_device *dev)
 {
 	struct bigmac *bp = netdev_priv(dev);
 	void __iomem *bregs = bp->bregs;
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct netdev_hw_addr *ha;
 	char *addrs;
 	int i;
 	u32 tmp, crc;
@@ -1013,7 +1011,7 @@ static void bigmac_set_multicast(struct net_device *dev)
 	while ((sbus_readl(bregs + BMAC_RXCFG) & BIGMAC_RXCFG_ENABLE) != 0)
 		udelay(20);
 
-	if ((dev->flags & IFF_ALLMULTI) || (dev->mc_count > 64)) {
+	if ((dev->flags & IFF_ALLMULTI) || (netdev_mc_count(dev) > 64)) {
 		sbus_writel(0xffff, bregs + BMAC_HTABLE0);
 		sbus_writel(0xffff, bregs + BMAC_HTABLE1);
 		sbus_writel(0xffff, bregs + BMAC_HTABLE2);
@@ -1028,9 +1026,8 @@ static void bigmac_set_multicast(struct net_device *dev)
 		for (i = 0; i < 4; i++)
 			hash_table[i] = 0;
 
-		for (i = 0; i < dev->mc_count; i++) {
-			addrs = dmi->dmi_addr;
-			dmi = dmi->next;
+		netdev_for_each_mc_addr(ha, dev) {
+			addrs = ha->addr;
 
 			if (!(*addrs & 1))
 				continue;
@@ -1072,6 +1069,18 @@ static u32 bigmac_get_link(struct net_device *dev)
 static const struct ethtool_ops bigmac_ethtool_ops = {
 	.get_drvinfo		= bigmac_get_drvinfo,
 	.get_link		= bigmac_get_link,
+};
+
+static const struct net_device_ops bigmac_ops = {
+	.ndo_open		= bigmac_open,
+	.ndo_stop		= bigmac_close,
+	.ndo_start_xmit		= bigmac_start_xmit,
+	.ndo_get_stats		= bigmac_get_stats,
+	.ndo_set_multicast_list	= bigmac_set_multicast,
+	.ndo_tx_timeout		= bigmac_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
 };
 
 static int __devinit bigmac_ether_init(struct of_device *op,
@@ -1122,8 +1131,8 @@ static int __devinit bigmac_ether_init(struct of_device *op,
 		goto fail_and_cleanup;
 
 	/* Get supported SBUS burst sizes. */
-	bsizes = of_getintprop_default(qec_op->node, "burst-sizes", 0xff);
-	bsizes_more = of_getintprop_default(qec_op->node, "burst-sizes", 0xff);
+	bsizes = of_getintprop_default(qec_op->dev.of_node, "burst-sizes", 0xff);
+	bsizes_more = of_getintprop_default(qec_op->dev.of_node, "burst-sizes", 0xff);
 
 	bsizes &= 0xff;
 	if (bsizes_more != 0xff)
@@ -1175,7 +1184,7 @@ static int __devinit bigmac_ether_init(struct of_device *op,
 	}
 
 	/* Get the board revision of this BigMAC. */
-	bp->board_rev = of_getintprop_default(bp->bigmac_op->node,
+	bp->board_rev = of_getintprop_default(bp->bigmac_op->dev.of_node,
 					      "board-version", 1);
 
 	/* Init auto-negotiation timer state. */
@@ -1187,16 +1196,8 @@ static int __devinit bigmac_ether_init(struct of_device *op,
 	bp->dev = dev;
 
 	/* Set links to our BigMAC open and close routines. */
-	dev->open = &bigmac_open;
-	dev->stop = &bigmac_close;
-	dev->hard_start_xmit = &bigmac_start_xmit;
 	dev->ethtool_ops = &bigmac_ethtool_ops;
-
-	/* Set links to BigMAC statistic and multi-cast loading code. */
-	dev->get_stats = &bigmac_get_stats;
-	dev->set_multicast_list = &bigmac_set_multicast;
-
-	dev->tx_timeout = &bigmac_tx_timeout;
+	dev->netdev_ops = &bigmac_ops;
 	dev->watchdog_timeo = 5*HZ;
 
 	/* Finish net device registration. */
@@ -1289,8 +1290,11 @@ static const struct of_device_id bigmac_sbus_match[] = {
 MODULE_DEVICE_TABLE(of, bigmac_sbus_match);
 
 static struct of_platform_driver bigmac_sbus_driver = {
-	.name		= "sunbmac",
-	.match_table	= bigmac_sbus_match,
+	.driver = {
+		.name = "sunbmac",
+		.owner = THIS_MODULE,
+		.of_match_table = bigmac_sbus_match,
+	},
 	.probe		= bigmac_sbus_probe,
 	.remove		= __devexit_p(bigmac_sbus_remove),
 };

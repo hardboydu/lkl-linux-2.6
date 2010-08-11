@@ -23,6 +23,7 @@
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
+#include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mc146818rtc.h>
@@ -148,7 +149,7 @@ static ssize_t smi_data_buf_size_store(struct device *dev,
 	return count;
 }
 
-static ssize_t smi_data_read(struct kobject *kobj,
+static ssize_t smi_data_read(struct file *filp, struct kobject *kobj,
 			     struct bin_attribute *bin_attr,
 			     char *buf, loff_t pos, size_t count)
 {
@@ -161,7 +162,7 @@ static ssize_t smi_data_read(struct kobject *kobj,
 	return ret;
 }
 
-static ssize_t smi_data_write(struct kobject *kobj,
+static ssize_t smi_data_write(struct file *filp, struct kobject *kobj,
 			      struct bin_attribute *bin_attr,
 			      char *buf, loff_t pos, size_t count)
 {
@@ -244,7 +245,7 @@ static ssize_t host_control_on_shutdown_store(struct device *dev,
  */
 int dcdbas_smi_request(struct smi_cmd *smi_cmd)
 {
-	cpumask_t old_mask;
+	cpumask_var_t old_mask;
 	int ret = 0;
 
 	if (smi_cmd->magic != SMI_CMD_MAGIC) {
@@ -254,8 +255,11 @@ int dcdbas_smi_request(struct smi_cmd *smi_cmd)
 	}
 
 	/* SMI requires CPU 0 */
-	old_mask = current->cpus_allowed;
-	set_cpus_allowed_ptr(current, &cpumask_of_cpu(0));
+	if (!alloc_cpumask_var(&old_mask, GFP_KERNEL))
+		return -ENOMEM;
+
+	cpumask_copy(old_mask, &current->cpus_allowed);
+	set_cpus_allowed_ptr(current, cpumask_of(0));
 	if (smp_processor_id() != 0) {
 		dev_dbg(&dcdbas_pdev->dev, "%s: failed to get CPU 0\n",
 			__func__);
@@ -275,7 +279,8 @@ int dcdbas_smi_request(struct smi_cmd *smi_cmd)
 	);
 
 out:
-	set_cpus_allowed_ptr(current, &old_mask);
+	set_cpus_allowed_ptr(current, old_mask);
+	free_cpumask_var(old_mask);
 	return ret;
 }
 
@@ -541,7 +546,7 @@ static int __devinit dcdbas_probe(struct platform_device *dev)
 	 * BIOS SMI calls require buffer addresses be in 32-bit address space.
 	 * This is done by setting the DMA mask below.
 	 */
-	dcdbas_pdev->dev.coherent_dma_mask = DMA_32BIT_MASK;
+	dcdbas_pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	dcdbas_pdev->dev.dma_mask = &dcdbas_pdev->dev.coherent_dma_mask;
 
 	error = sysfs_create_group(&dev->dev.kobj, &dcdbas_attr_group);

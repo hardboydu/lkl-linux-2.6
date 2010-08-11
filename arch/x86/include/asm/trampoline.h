@@ -13,9 +13,9 @@ extern unsigned char *trampoline_base;
 
 extern unsigned long init_rsp;
 extern unsigned long initial_code;
+extern unsigned long initial_gs;
 
 #define TRAMPOLINE_SIZE roundup(trampoline_end - trampoline_data, PAGE_SIZE)
-#define TRAMPOLINE_BASE 0x6000
 
 extern unsigned long setup_trampoline(void);
 extern void __init reserve_trampoline_memory(void);

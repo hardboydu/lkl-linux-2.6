@@ -126,8 +126,7 @@ static inline void cmtp_add_msgpart(struct cmtp_session *session, int id, const 
 
 	session->reassembly[id] = nskb;
 
-	if (skb)
-		kfree_skb(skb);
+	kfree_skb(skb);
 }
 
 static inline int cmtp_recv_frame(struct cmtp_session *session, struct sk_buff *skb)
@@ -285,7 +284,7 @@ static int cmtp_session(void *arg)
 	set_user_nice(current, -15);
 
 	init_waitqueue_entry(&wait, current);
-	add_wait_queue(sk->sk_sleep, &wait);
+	add_wait_queue(sk_sleep(sk), &wait);
 	while (!atomic_read(&session->terminate)) {
 		set_current_state(TASK_INTERRUPTIBLE);
 
@@ -302,7 +301,7 @@ static int cmtp_session(void *arg)
 		schedule();
 	}
 	set_current_state(TASK_RUNNING);
-	remove_wait_queue(sk->sk_sleep, &wait);
+	remove_wait_queue(sk_sleep(sk), &wait);
 
 	down_write(&cmtp_session_sem);
 

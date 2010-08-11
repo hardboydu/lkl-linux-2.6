@@ -21,8 +21,8 @@
 #define ATOMIC_INIT(i)		((atomic_t) { (i) })
 #define ATOMIC64_INIT(i)	((atomic64_t) { (i) })
 
-#define atomic_read(v)		((v)->counter)
-#define atomic64_read(v)	((v)->counter)
+#define atomic_read(v)		(*(volatile int *)&(v)->counter)
+#define atomic64_read(v)	(*(volatile long *)&(v)->counter)
 
 #define atomic_set(v,i)		(((v)->counter) = (i))
 #define atomic64_set(v,i)	(((v)->counter) = (i))
@@ -216,5 +216,5 @@ atomic64_add_negative (__s64 i, atomic64_t *v)
 #define smp_mb__before_atomic_inc()	barrier()
 #define smp_mb__after_atomic_inc()	barrier()
 
-#include <asm-generic/atomic.h>
+#include <asm-generic/atomic-long.h>
 #endif /* _ASM_IA64_ATOMIC_H */

@@ -654,7 +654,7 @@ struct local_info {
 	rwlock_t iface_lock; /* hostap_interfaces read lock; use write lock
 			      * when removing entries from the list.
 			      * TX and RX paths can use read lock. */
-	spinlock_t cmdlock, baplock, lock;
+	spinlock_t cmdlock, baplock, lock, irq_init_lock;
 	struct mutex rid_bap_mtx;
 	u16 infofid; /* MAC buffer id for info frame */
 	/* txfid, intransmitfid, next_txtid, and next_alloc are protected by
@@ -684,7 +684,6 @@ struct local_info {
 	u16 channel_mask; /* mask of allowed channels */
 	u16 scan_channel_mask; /* mask of channels to be scanned */
 	struct comm_tallies_sums comm_tallies;
-	struct net_device_stats stats;
 	struct proc_dir_entry *proc;
 	int iw_mode; /* operating mode (IW_MODE_*) */
 	int pseudo_adhoc; /* 0: IW_MODE_ADHOC is real 802.11 compliant IBSS

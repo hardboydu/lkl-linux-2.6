@@ -300,7 +300,8 @@ static unsigned char lance_need_isa_bounce_buffers = 1;
 
 static int lance_open(struct net_device *dev);
 static void lance_init_ring(struct net_device *dev, gfp_t mode);
-static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t lance_start_xmit(struct sk_buff *skb,
+				    struct net_device *dev);
 static int lance_rx(struct net_device *dev);
 static irqreturn_t lance_interrupt(int irq, void *dev_id);
 static int lance_close(struct net_device *dev);
@@ -391,7 +392,8 @@ MODULE_LICENSE("GPL");
    */
 static int __init do_lance_probe(struct net_device *dev)
 {
-	int *port, result;
+	unsigned int *port;
+	int result;
 
 	if (high_memory <= phys_to_virt(16*1024*1024))
 		lance_need_isa_bounce_buffers = 0;
@@ -453,16 +455,28 @@ out:
 }
 #endif
 
+static const struct net_device_ops lance_netdev_ops = {
+	.ndo_open 		= lance_open,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_stop		= lance_close,
+	.ndo_get_stats		= lance_get_stats,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_tx_timeout		= lance_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int options)
 {
 	struct lance_private *lp;
-	long dma_channels;			/* Mark spuriously-busy DMA channels */
+	unsigned long dma_channels;	/* Mark spuriously-busy DMA channels */
 	int i, reset_val, lance_version;
 	const char *chipname;
 	/* Flags for specific chips or boards. */
-	unsigned char hpJ2405A = 0;		/* HP ISA adaptor */
-	int hp_builtin = 0;			/* HP on-board ethernet. */
-	static int did_version;			/* Already printed version info. */
+	unsigned char hpJ2405A = 0;	/* HP ISA adaptor */
+	int hp_builtin = 0;		/* HP on-board ethernet. */
+	static int did_version;		/* Already printed version info. */
 	unsigned long flags;
 	int err = -ENOMEM;
 	void __iomem *bios;
@@ -479,14 +493,14 @@ static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int 
 		static const short ioaddr_table[] = { 0x300, 0x320, 0x340, 0x360};
 		int hp_port = (readl(bios + 1) & 1)  ? 0x499 : 0x99;
 		/* We can have boards other than the built-in!  Verify this is on-board. */
-		if ((inb(hp_port) & 0xc0) == 0x80
-			&& ioaddr_table[inb(hp_port) & 3] == ioaddr)
+		if ((inb(hp_port) & 0xc0) == 0x80 &&
+		    ioaddr_table[inb(hp_port) & 3] == ioaddr)
 			hp_builtin = hp_port;
 	}
 	iounmap(bios);
 	/* We also recognize the HP Vectra on-board here, but check below. */
-	hpJ2405A = (inb(ioaddr) == 0x08 && inb(ioaddr+1) == 0x00
-				&& inb(ioaddr+2) == 0x09);
+	hpJ2405A = (inb(ioaddr) == 0x08 && inb(ioaddr+1) == 0x00 &&
+		    inb(ioaddr+2) == 0x09);
 
 	/* Reset the LANCE.	 */
 	reset_val = inw(ioaddr+LANCE_RESET); /* Reset the LANCE */
@@ -713,12 +727,7 @@ static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int 
 		printk(version);
 
 	/* The LANCE-specific entries in the device structure. */
-	dev->open = lance_open;
-	dev->hard_start_xmit = lance_start_xmit;
-	dev->stop = lance_close;
-	dev->get_stats = lance_get_stats;
-	dev->set_multicast_list = set_multicast_list;
-	dev->tx_timeout = lance_tx_timeout;
+	dev->netdev_ops = &lance_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
 	err = register_netdev(dev);
@@ -746,7 +755,7 @@ lance_open(struct net_device *dev)
 	int i;
 
 	if (dev->irq == 0 ||
-		request_irq(dev->irq, &lance_interrupt, 0, lp->name, dev)) {
+		request_irq(dev->irq, lance_interrupt, 0, lp->name, dev)) {
 		return -EAGAIN;
 	}
 
@@ -936,12 +945,13 @@ static void lance_tx_timeout (struct net_device *dev)
 #endif
 	lance_restart (dev, 0x0043, 1);
 
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	netif_wake_queue (dev);
 }
 
 
-static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t lance_start_xmit(struct sk_buff *skb,
+				    struct net_device *dev)
 {
 	struct lance_private *lp = dev->ml_priv;
 	int ioaddr = dev->base_addr;
@@ -1001,14 +1011,12 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	outw(0x0000, ioaddr+LANCE_ADDR);
 	outw(0x0048, ioaddr+LANCE_DATA);
 
-	dev->trans_start = jiffies;
-
 	if ((lp->cur_tx - lp->dirty_tx) >= TX_RING_SIZE)
 		netif_stop_queue(dev);
 
 out:
 	spin_unlock_irqrestore(&lp->devlock, flags);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The LANCE interrupt handler. */
@@ -1025,8 +1033,8 @@ static irqreturn_t lance_interrupt(int irq, void *dev_id)
 	spin_lock (&lp->devlock);
 
 	outw(0x00, dev->base_addr + LANCE_ADDR);
-	while ((csr0 = inw(dev->base_addr + LANCE_DATA)) & 0x8600
-		   && --boguscnt >= 0) {
+	while ((csr0 = inw(dev->base_addr + LANCE_DATA)) & 0x8600 &&
+	       --boguscnt >= 0) {
 		/* Acknowledge all of the current interrupt sources ASAP. */
 		outw(csr0 & ~0x004f, dev->base_addr + LANCE_DATA);
 
@@ -1278,7 +1286,7 @@ static void set_multicast_list(struct net_device *dev)
 	} else {
 		short multicast_table[4];
 		int i;
-		int num_addrs=dev->mc_count;
+		int num_addrs=netdev_mc_count(dev);
 		if(dev->flags&IFF_ALLMULTI)
 			num_addrs=1;
 		/* FIXIT: We don't use the multicast table, but rely on upper-layer filtering. */

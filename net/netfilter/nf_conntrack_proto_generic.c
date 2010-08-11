@@ -69,9 +69,7 @@ static struct ctl_table generic_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{
-		.ctl_name	= 0
-	}
+	{ }
 };
 #ifdef CONFIG_NF_CONNTRACK_PROC_COMPAT
 static struct ctl_table generic_compat_sysctl_table[] = {
@@ -82,9 +80,7 @@ static struct ctl_table generic_compat_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{
-		.ctl_name	= 0
-	}
+	{ }
 };
 #endif /* CONFIG_NF_CONNTRACK_PROC_COMPAT */
 #endif /* CONFIG_SYSCTL */
@@ -92,7 +88,7 @@ static struct ctl_table generic_compat_sysctl_table[] = {
 struct nf_conntrack_l4proto nf_conntrack_l4proto_generic __read_mostly =
 {
 	.l3proto		= PF_UNSPEC,
-	.l4proto		= 0,
+	.l4proto		= 255,
 	.name			= "unknown",
 	.pkt_to_tuple		= generic_pkt_to_tuple,
 	.invert_tuple		= generic_invert_tuple,

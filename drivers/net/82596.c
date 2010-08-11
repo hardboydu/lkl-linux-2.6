@@ -19,7 +19,7 @@
    TBD:
    * look at deferring rx frames rather than discarding (as per tulip)
    * handle tx ring full as per tulip
-   * performace test to tune rx_copybreak
+   * performance test to tune rx_copybreak
 
    Most of my modifications relate to the braindead big-endian
    implementation by Intel.  When the i596 is operating in
@@ -45,7 +45,6 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -53,6 +52,7 @@
 #include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
+#include <linux/gfp.h>
 
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -122,13 +122,13 @@ static char version[] __initdata =
 #define ISCP_BUSY	0x00010000
 #define MACH_IS_APRICOT	0
 #else
-#define WSWAPrfd(x)     ((struct i596_rfd *)(x))
-#define WSWAPrbd(x)     ((struct i596_rbd *)(x))
-#define WSWAPiscp(x)    ((struct i596_iscp *)(x))
-#define WSWAPscb(x)     ((struct i596_scb *)(x))
-#define WSWAPcmd(x)     ((struct i596_cmd *)(x))
-#define WSWAPtbd(x)     ((struct i596_tbd *)(x))
-#define WSWAPchar(x)    ((char *)(x))
+#define WSWAPrfd(x)     ((struct i596_rfd *)((long)x))
+#define WSWAPrbd(x)     ((struct i596_rbd *)((long)x))
+#define WSWAPiscp(x)    ((struct i596_iscp *)((long)x))
+#define WSWAPscb(x)     ((struct i596_scb *)((long)x))
+#define WSWAPcmd(x)     ((struct i596_cmd *)((long)x))
+#define WSWAPtbd(x)     ((struct i596_tbd *)((long)x))
+#define WSWAPchar(x)    ((char *)((long)x))
 #define ISCP_BUSY	0x0001
 #define MACH_IS_APRICOT	1
 #endif
@@ -356,7 +356,7 @@ static char init_setup[] =
 	0x7f /*  *multi IA */ };
 
 static int i596_open(struct net_device *dev);
-static int i596_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t i596_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t i596_interrupt(int irq, void *dev_id);
 static int i596_close(struct net_device *dev);
 static void i596_add_cmd(struct net_device *dev, struct i596_cmd *cmd);
@@ -1050,25 +1050,23 @@ static void i596_tx_timeout (struct net_device *dev)
 		lp->last_restart = dev->stats.tx_packets;
 	}
 
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	netif_wake_queue (dev);
 }
 
-
-static int i596_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t i596_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct i596_private *lp = dev->ml_priv;
 	struct tx_cmd *tx_cmd;
 	struct i596_tbd *tbd;
 	short length = skb->len;
-	dev->trans_start = jiffies;
 
 	DEB(DEB_STARTTX,printk(KERN_DEBUG "%s: i596_start_xmit(%x,%p) called\n",
 				dev->name, skb->len, skb->data));
 
 	if (skb->len < ETH_ZLEN) {
 		if (skb_padto(skb, ETH_ZLEN))
-			return 0;
+			return NETDEV_TX_OK;
 		length = ETH_ZLEN;
 	}
 	netif_stop_queue(dev);
@@ -1110,7 +1108,7 @@ static int i596_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	netif_start_queue(dev);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void print_eth(unsigned char *add, char *str)
@@ -1121,6 +1119,17 @@ static void print_eth(unsigned char *add, char *str)
 
 static int io = 0x300;
 static int irq = 10;
+
+static const struct net_device_ops i596_netdev_ops = {
+	.ndo_open 		= i596_open,
+	.ndo_stop		= i596_close,
+	.ndo_start_xmit		= i596_start_xmit,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_tx_timeout		= i596_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 struct net_device * __init i82596_probe(int unit)
 {
@@ -1232,11 +1241,7 @@ found:
 	DEB(DEB_PROBE,printk(KERN_INFO "%s", version));
 
 	/* The 82596-specific entries in the device structure. */
-	dev->open = i596_open;
-	dev->stop = i596_close;
-	dev->hard_start_xmit = i596_start_xmit;
-	dev->set_multicast_list = set_multicast_list;
-	dev->tx_timeout = i596_tx_timeout;
+	dev->netdev_ops = &i596_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
 	dev->ml_priv = (void *)(dev->mem_start);
@@ -1499,7 +1504,7 @@ static void set_multicast_list(struct net_device *dev)
 	int config = 0, cnt;
 
 	DEB(DEB_MULTI,printk(KERN_DEBUG "%s: set multicast list, %d entries, promisc %s, allmulti %s\n",
-		dev->name, dev->mc_count,
+		dev->name, netdev_mc_count(dev),
 		dev->flags & IFF_PROMISC  ? "ON" : "OFF",
 		dev->flags & IFF_ALLMULTI ? "ON" : "OFF"));
 
@@ -1527,7 +1532,7 @@ static void set_multicast_list(struct net_device *dev)
 		i596_add_cmd(dev, &lp->cf_cmd.cmd);
 	}
 
-	cnt = dev->mc_count;
+	cnt = netdev_mc_count(dev);
 	if (cnt > MAX_MC_CNT)
 	{
 		cnt = MAX_MC_CNT;
@@ -1535,8 +1540,8 @@ static void set_multicast_list(struct net_device *dev)
 			dev->name, cnt);
 	}
 
-	if (dev->mc_count > 0) {
-		struct dev_mc_list *dmi;
+	if (!netdev_mc_empty(dev)) {
+		struct netdev_hw_addr *ha;
 		unsigned char *cp;
 		struct mc_cmd *cmd;
 
@@ -1544,13 +1549,16 @@ static void set_multicast_list(struct net_device *dev)
 			return;
 		cmd = &lp->mc_cmd;
 		cmd->cmd.command = CmdMulticastList;
-		cmd->mc_cnt = dev->mc_count * 6;
+		cmd->mc_cnt = cnt * ETH_ALEN;
 		cp = cmd->mc_addrs;
-		for (dmi = dev->mc_list; cnt && dmi != NULL; dmi = dmi->next, cnt--, cp += 6) {
-			memcpy(cp, dmi->dmi_addr, 6);
+		netdev_for_each_mc_addr(ha, dev) {
+			if (!cnt--)
+				break;
+			memcpy(cp, ha->addr, ETH_ALEN);
 			if (i596_debug > 1)
 				DEB(DEB_MULTI,printk(KERN_INFO "%s: Adding address %pM\n",
 						dev->name, cp));
+			cp += ETH_ALEN;
 		}
 		i596_add_cmd(dev, &cmd->cmd);
 	}

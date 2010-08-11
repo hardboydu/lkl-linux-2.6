@@ -22,9 +22,10 @@
 
 static DEFINE_SPINLOCK(print_lock);
 
-static DEFINE_PER_CPU(unsigned long, touch_timestamp);
-static DEFINE_PER_CPU(unsigned long, print_timestamp);
-static DEFINE_PER_CPU(struct task_struct *, watchdog_task);
+static DEFINE_PER_CPU(unsigned long, softlockup_touch_ts); /* touch timestamp */
+static DEFINE_PER_CPU(unsigned long, softlockup_print_ts); /* print timestamp */
+static DEFINE_PER_CPU(struct task_struct *, softlockup_watchdog);
+static DEFINE_PER_CPU(bool, softlock_touch_sync);
 
 static int __read_mostly did_panic;
 int __read_mostly softlockup_thresh = 60;
@@ -70,14 +71,20 @@ static void __touch_softlockup_watchdog(void)
 {
 	int this_cpu = raw_smp_processor_id();
 
-	__raw_get_cpu_var(touch_timestamp) = get_timestamp(this_cpu);
+	__raw_get_cpu_var(softlockup_touch_ts) = get_timestamp(this_cpu);
 }
 
 void touch_softlockup_watchdog(void)
 {
-	__raw_get_cpu_var(touch_timestamp) = 0;
+	__raw_get_cpu_var(softlockup_touch_ts) = 0;
 }
 EXPORT_SYMBOL(touch_softlockup_watchdog);
+
+void touch_softlockup_watchdog_sync(void)
+{
+	__raw_get_cpu_var(softlock_touch_sync) = true;
+	__raw_get_cpu_var(softlockup_touch_ts) = 0;
+}
 
 void touch_all_softlockup_watchdogs(void)
 {
@@ -85,16 +92,16 @@ void touch_all_softlockup_watchdogs(void)
 
 	/* Cause each CPU to re-update its timestamp rather than complain */
 	for_each_online_cpu(cpu)
-		per_cpu(touch_timestamp, cpu) = 0;
+		per_cpu(softlockup_touch_ts, cpu) = 0;
 }
 EXPORT_SYMBOL(touch_all_softlockup_watchdogs);
 
 int proc_dosoftlockup_thresh(struct ctl_table *table, int write,
-			     struct file *filp, void __user *buffer,
+			     void __user *buffer,
 			     size_t *lenp, loff_t *ppos)
 {
 	touch_all_softlockup_watchdogs();
-	return proc_dointvec_minmax(table, write, filp, buffer, lenp, ppos);
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 }
 
 /*
@@ -104,28 +111,36 @@ int proc_dosoftlockup_thresh(struct ctl_table *table, int write,
 void softlockup_tick(void)
 {
 	int this_cpu = smp_processor_id();
-	unsigned long touch_timestamp = per_cpu(touch_timestamp, this_cpu);
-	unsigned long print_timestamp;
+	unsigned long touch_ts = per_cpu(softlockup_touch_ts, this_cpu);
+	unsigned long print_ts;
 	struct pt_regs *regs = get_irq_regs();
 	unsigned long now;
 
 	/* Is detection switched off? */
-	if (!per_cpu(watchdog_task, this_cpu) || softlockup_thresh <= 0) {
+	if (!per_cpu(softlockup_watchdog, this_cpu) || softlockup_thresh <= 0) {
 		/* Be sure we don't false trigger if switched back on */
-		if (touch_timestamp)
-			per_cpu(touch_timestamp, this_cpu) = 0;
+		if (touch_ts)
+			per_cpu(softlockup_touch_ts, this_cpu) = 0;
 		return;
 	}
 
-	if (touch_timestamp == 0) {
+	if (touch_ts == 0) {
+		if (unlikely(per_cpu(softlock_touch_sync, this_cpu))) {
+			/*
+			 * If the time stamp was touched atomically
+			 * make sure the scheduler tick is up to date.
+			 */
+			per_cpu(softlock_touch_sync, this_cpu) = false;
+			sched_clock_tick();
+		}
 		__touch_softlockup_watchdog();
 		return;
 	}
 
-	print_timestamp = per_cpu(print_timestamp, this_cpu);
+	print_ts = per_cpu(softlockup_print_ts, this_cpu);
 
 	/* report at most once a second */
-	if (print_timestamp == touch_timestamp || did_panic)
+	if (print_ts == touch_ts || did_panic)
 		return;
 
 	/* do not print during early bootup: */
@@ -140,18 +155,18 @@ void softlockup_tick(void)
 	 * Wake up the high-prio watchdog task twice per
 	 * threshold timespan.
 	 */
-	if (now > touch_timestamp + softlockup_thresh/2)
-		wake_up_process(per_cpu(watchdog_task, this_cpu));
+	if (time_after(now - softlockup_thresh/2, touch_ts))
+		wake_up_process(per_cpu(softlockup_watchdog, this_cpu));
 
 	/* Warn about unreasonable delays: */
-	if (now <= (touch_timestamp + softlockup_thresh))
+	if (time_before_eq(now - softlockup_thresh, touch_ts))
 		return;
 
-	per_cpu(print_timestamp, this_cpu) = touch_timestamp;
+	per_cpu(softlockup_print_ts, this_cpu) = touch_ts;
 
 	spin_lock(&print_lock);
 	printk(KERN_ERR "BUG: soft lockup - CPU#%d stuck for %lus! [%s:%d]\n",
-			this_cpu, now - touch_timestamp,
+			this_cpu, now - touch_ts,
 			current->comm, task_pid_nr(current));
 	print_modules();
 	print_irqtrace_events(current);
@@ -166,97 +181,11 @@ void softlockup_tick(void)
 }
 
 /*
- * Have a reasonable limit on the number of tasks checked:
- */
-unsigned long __read_mostly sysctl_hung_task_check_count = 1024;
-
-/*
- * Zero means infinite timeout - no checking done:
- */
-unsigned long __read_mostly sysctl_hung_task_timeout_secs = 480;
-
-unsigned long __read_mostly sysctl_hung_task_warnings = 10;
-
-/*
- * Only do the hung-tasks check on one CPU:
- */
-static int check_cpu __read_mostly = -1;
-
-static void check_hung_task(struct task_struct *t, unsigned long now)
-{
-	unsigned long switch_count = t->nvcsw + t->nivcsw;
-
-	if (t->flags & PF_FROZEN)
-		return;
-
-	if (switch_count != t->last_switch_count || !t->last_switch_timestamp) {
-		t->last_switch_count = switch_count;
-		t->last_switch_timestamp = now;
-		return;
-	}
-	if ((long)(now - t->last_switch_timestamp) <
-					sysctl_hung_task_timeout_secs)
-		return;
-	if (!sysctl_hung_task_warnings)
-		return;
-	sysctl_hung_task_warnings--;
-
-	/*
-	 * Ok, the task did not get scheduled for more than 2 minutes,
-	 * complain:
-	 */
-	printk(KERN_ERR "INFO: task %s:%d blocked for more than "
-			"%ld seconds.\n", t->comm, t->pid,
-			sysctl_hung_task_timeout_secs);
-	printk(KERN_ERR "\"echo 0 > /proc/sys/kernel/hung_task_timeout_secs\""
-			" disables this message.\n");
-	sched_show_task(t);
-	__debug_show_held_locks(t);
-
-	t->last_switch_timestamp = now;
-	touch_nmi_watchdog();
-
-	if (softlockup_panic)
-		panic("softlockup: blocked tasks");
-}
-
-/*
- * Check whether a TASK_UNINTERRUPTIBLE does not get woken up for
- * a really long time (120 seconds). If that happens, print out
- * a warning.
- */
-static void check_hung_uninterruptible_tasks(int this_cpu)
-{
-	int max_count = sysctl_hung_task_check_count;
-	unsigned long now = get_timestamp(this_cpu);
-	struct task_struct *g, *t;
-
-	/*
-	 * If the system crashed already then all bets are off,
-	 * do not report extra hung tasks:
-	 */
-	if (test_taint(TAINT_DIE) || did_panic)
-		return;
-
-	read_lock(&tasklist_lock);
-	do_each_thread(g, t) {
-		if (!--max_count)
-			goto unlock;
-		/* use "==" to skip the TASK_KILLABLE tasks waiting on NFS */
-		if (t->state == TASK_UNINTERRUPTIBLE)
-			check_hung_task(t, now);
-	} while_each_thread(g, t);
- unlock:
-	read_unlock(&tasklist_lock);
-}
-
-/*
  * The watchdog thread - runs every second and touches the timestamp.
  */
 static int watchdog(void *__bind_cpu)
 {
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
-	int this_cpu = (long)__bind_cpu;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
 
@@ -275,11 +204,6 @@ static int watchdog(void *__bind_cpu)
 
 		if (kthread_should_stop())
 			break;
-
-		if (this_cpu == check_cpu) {
-			if (sysctl_hung_task_timeout_secs)
-				check_hung_uninterruptible_tasks(this_cpu);
-		}
 
 		set_current_state(TASK_INTERRUPTIBLE);
 	}
@@ -300,41 +224,32 @@ cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
 	switch (action) {
 	case CPU_UP_PREPARE:
 	case CPU_UP_PREPARE_FROZEN:
-		BUG_ON(per_cpu(watchdog_task, hotcpu));
+		BUG_ON(per_cpu(softlockup_watchdog, hotcpu));
 		p = kthread_create(watchdog, hcpu, "watchdog/%d", hotcpu);
 		if (IS_ERR(p)) {
 			printk(KERN_ERR "watchdog for %i failed\n", hotcpu);
 			return NOTIFY_BAD;
 		}
-		per_cpu(touch_timestamp, hotcpu) = 0;
-		per_cpu(watchdog_task, hotcpu) = p;
+		per_cpu(softlockup_touch_ts, hotcpu) = 0;
+		per_cpu(softlockup_watchdog, hotcpu) = p;
 		kthread_bind(p, hotcpu);
 		break;
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
-		check_cpu = cpumask_any(cpu_online_mask);
-		wake_up_process(per_cpu(watchdog_task, hotcpu));
+		wake_up_process(per_cpu(softlockup_watchdog, hotcpu));
 		break;
 #ifdef CONFIG_HOTPLUG_CPU
-	case CPU_DOWN_PREPARE:
-	case CPU_DOWN_PREPARE_FROZEN:
-		if (hotcpu == check_cpu) {
-			/* Pick any other online cpu. */
-			check_cpu = cpumask_any_but(cpu_online_mask, hotcpu);
-		}
-		break;
-
 	case CPU_UP_CANCELED:
 	case CPU_UP_CANCELED_FROZEN:
-		if (!per_cpu(watchdog_task, hotcpu))
+		if (!per_cpu(softlockup_watchdog, hotcpu))
 			break;
 		/* Unbind so it can run.  Fall thru. */
-		kthread_bind(per_cpu(watchdog_task, hotcpu),
+		kthread_bind(per_cpu(softlockup_watchdog, hotcpu),
 			     cpumask_any(cpu_online_mask));
 	case CPU_DEAD:
 	case CPU_DEAD_FROZEN:
-		p = per_cpu(watchdog_task, hotcpu);
-		per_cpu(watchdog_task, hotcpu) = NULL;
+		p = per_cpu(softlockup_watchdog, hotcpu);
+		per_cpu(softlockup_watchdog, hotcpu) = NULL;
 		kthread_stop(p);
 		break;
 #endif /* CONFIG_HOTPLUG_CPU */

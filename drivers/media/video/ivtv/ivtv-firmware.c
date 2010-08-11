@@ -52,7 +52,7 @@ static int load_fw_direct(const char *fn, volatile u8 __iomem *mem, struct ivtv 
 	int retries = 3;
 
 retry:
-	if (retries && request_firmware(&fw, fn, &itv->dev->dev) == 0) {
+	if (retries && request_firmware(&fw, fn, &itv->pdev->dev) == 0) {
 		int i;
 		volatile u32 __iomem *dst = (volatile u32 __iomem *)mem;
 		const u32 *src = (const u32 *)fw->data;
@@ -258,7 +258,7 @@ void ivtv_init_mpeg_decoder(struct ivtv *itv)
 		IVTV_ERR("ivtv_init_mpeg_decoder failed to start playback\n");
 		return;
 	}
-	ivtv_api_get_data(&itv->dec_mbox, IVTV_MBOX_DMA, data);
+	ivtv_api_get_data(&itv->dec_mbox, IVTV_MBOX_DMA, 2, data);
 	mem_offset = itv->dec_mem + data[1];
 
 	if ((readbytes = load_fw_direct(IVTV_DECODE_INIT_MPEG_FILENAME,

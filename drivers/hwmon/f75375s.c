@@ -1,7 +1,7 @@
 /*
  * f75375s.c - driver for the Fintek F75375/SP and F75373
  *             hardware monitoring features
- * Copyright (C) 2006-2007  Riku Voipio <riku.voipio@movial.fi>
+ * Copyright (C) 2006-2007  Riku Voipio
  *
  * Datasheets available at:
  *
@@ -35,12 +35,12 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/f75375s.h>
+#include <linux/slab.h>
 
 /* Addresses to scan */
 static const unsigned short normal_i2c[] = { 0x2d, 0x2e, I2C_CLIENT_END };
 
-/* Insmod parameters */
-I2C_CLIENT_INSMOD_2(f75373, f75375);
+enum chips { f75373, f75375 };
 
 /* Fintek F75375 registers  */
 #define F75375_REG_CONFIG0		0x0
@@ -113,7 +113,7 @@ struct f75375_data {
 	s8 temp_max_hyst[2];
 };
 
-static int f75375_detect(struct i2c_client *client, int kind,
+static int f75375_detect(struct i2c_client *client,
 			 struct i2c_board_info *info);
 static int f75375_probe(struct i2c_client *client,
 			const struct i2c_device_id *id);
@@ -135,7 +135,7 @@ static struct i2c_driver f75375_driver = {
 	.remove = f75375_remove,
 	.id_table = f75375_id,
 	.detect = f75375_detect,
-	.address_data = &addr_data,
+	.address_list = normal_i2c,
 };
 
 static inline int f75375_read8(struct i2c_client *client, u8 reg)
@@ -662,7 +662,6 @@ exit_remove:
 	sysfs_remove_group(&client->dev.kobj, &f75375_group);
 exit_free:
 	kfree(data);
-	i2c_set_clientdata(client, NULL);
 	return err;
 }
 
@@ -672,39 +671,28 @@ static int f75375_remove(struct i2c_client *client)
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &f75375_group);
 	kfree(data);
-	i2c_set_clientdata(client, NULL);
 	return 0;
 }
 
 /* Return 0 if detection is successful, -ENODEV otherwise */
-static int f75375_detect(struct i2c_client *client, int kind,
+static int f75375_detect(struct i2c_client *client,
 			 struct i2c_board_info *info)
 {
 	struct i2c_adapter *adapter = client->adapter;
-	u8 version = 0;
-	const char *name = "";
+	u16 vendid, chipid;
+	u8 version;
+	const char *name;
 
-	if (kind < 0) {
-		u16 vendid = f75375_read16(client, F75375_REG_VENDOR);
-		u16 chipid = f75375_read16(client, F75375_CHIP_ID);
-		version = f75375_read8(client, F75375_REG_VERSION);
-		if (chipid == 0x0306 && vendid == 0x1934) {
-			kind = f75375;
-		} else if (chipid == 0x0204 && vendid == 0x1934) {
-			kind = f75373;
-		} else {
-			dev_err(&adapter->dev,
-				"failed,%02X,%02X,%02X\n",
-				chipid, version, vendid);
-			return -ENODEV;
-		}
-	}
-
-	if (kind == f75375) {
+	vendid = f75375_read16(client, F75375_REG_VENDOR);
+	chipid = f75375_read16(client, F75375_CHIP_ID);
+	if (chipid == 0x0306 && vendid == 0x1934)
 		name = "f75375";
-	} else if (kind == f75373) {
+	else if (chipid == 0x0204 && vendid == 0x1934)
 		name = "f75373";
-	}
+	else
+		return -ENODEV;
+
+	version = f75375_read8(client, F75375_REG_VERSION);
 	dev_info(&adapter->dev, "found %s version: %02X\n", name, version);
 	strlcpy(info->type, name, I2C_NAME_SIZE);
 
@@ -721,7 +709,7 @@ static void __exit sensors_f75375_exit(void)
 	i2c_del_driver(&f75375_driver);
 }
 
-MODULE_AUTHOR("Riku Voipio <riku.voipio@movial.fi>");
+MODULE_AUTHOR("Riku Voipio");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("F75373/F75375 hardware monitoring driver");
 

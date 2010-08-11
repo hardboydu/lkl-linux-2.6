@@ -102,8 +102,7 @@ static int h4_close(struct hci_uart *hu)
 
 	skb_queue_purge(&h4->txq);
 
-	if (h4->rx_skb)
-		kfree_skb(h4->rx_skb);
+	kfree_skb(h4->rx_skb);
 
 	hu->priv = NULL;
 	kfree(h4);
@@ -247,7 +246,7 @@ static int h4_recv(struct hci_uart *hu, void *data, int count)
 			BT_ERR("Can't allocate mem for new packet");
 			h4->rx_state = H4_W4_PACKET_TYPE;
 			h4->rx_count = 0;
-			return 0;
+			return -ENOMEM;
 		}
 
 		h4->rx_skb->dev = (void *) hu->hdev;

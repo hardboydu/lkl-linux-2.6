@@ -17,6 +17,8 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
+#include <linux/kernel.h>
+#include <linux/slab.h>
 
 #include "ivtv-driver.h"
 #include "ivtv-cards.h"
@@ -26,6 +28,7 @@
 #include "ivtv-mailbox.h"
 #include "ivtv-controls.h"
 
+/* Must be sorted from low to high control ID! */
 static const u32 user_ctrls[] = {
 	V4L2_CID_USER_CLASS,
 	V4L2_CID_BRIGHTNESS,
@@ -59,6 +62,8 @@ int ivtv_queryctrl(struct file *file, void *fh, struct v4l2_queryctrl *qctrl)
 
 	switch (qctrl->id) {
 	/* Standard V4L2 controls */
+	case V4L2_CID_USER_CLASS:
+		return v4l2_ctrl_query_fill(qctrl, 0, 0, 0, 0);
 	case V4L2_CID_BRIGHTNESS:
 	case V4L2_CID_HUE:
 	case V4L2_CID_SATURATION:
@@ -262,13 +267,13 @@ int ivtv_s_ext_ctrls(struct file *file, void *fh, struct v4l2_ext_controls *c)
 		if (p.video_encoding != itv->params.video_encoding) {
 			int is_mpeg1 = p.video_encoding ==
 				V4L2_MPEG_VIDEO_ENCODING_MPEG_1;
-			struct v4l2_format fmt;
+			struct v4l2_mbus_framefmt fmt;
 
 			/* fix videodecoder resolution */
-			fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-			fmt.fmt.pix.width = itv->params.width / (is_mpeg1 ? 2 : 1);
-			fmt.fmt.pix.height = itv->params.height;
-			v4l2_subdev_call(itv->sd_video, video, s_fmt, &fmt);
+			fmt.width = itv->params.width / (is_mpeg1 ? 2 : 1);
+			fmt.height = itv->params.height;
+			fmt.code = V4L2_MBUS_FMT_FIXED;
+			v4l2_subdev_call(itv->sd_video, video, s_mbus_fmt, &fmt);
 		}
 		err = cx2341x_update(itv, ivtv_api_func, &itv->params, &p);
 		if (!err && itv->params.stream_vbi_fmt != p.stream_vbi_fmt)
@@ -278,7 +283,7 @@ int ivtv_s_ext_ctrls(struct file *file, void *fh, struct v4l2_ext_controls *c)
 		idx = p.audio_properties & 0x03;
 		/* The audio clock of the digitizer must match the codec sample
 		   rate otherwise you get some very strange effects. */
-		if (idx < sizeof(freqs))
+		if (idx < ARRAY_SIZE(freqs))
 			ivtv_call_all(itv, audio, s_clock_freq, freqs[idx]);
 		return err;
 	}

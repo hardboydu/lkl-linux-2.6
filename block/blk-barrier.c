@@ -5,6 +5,7 @@
 #include <linux/module.h>
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/gfp.h>
 
 #include "blk.h"
 
@@ -106,10 +107,7 @@ bool blk_ordered_complete_seq(struct request_queue *q, unsigned seq, int error)
 	 */
 	q->ordseq = 0;
 	rq = q->orig_bar_rq;
-
-	if (__blk_end_request(rq, q->orderr, blk_rq_bytes(rq)))
-		BUG();
-
+	__blk_end_request_all(rq, q->orderr);
 	return true;
 }
 
@@ -166,7 +164,7 @@ static inline bool start_ordered(struct request_queue *q, struct request **rqp)
 	 * For an empty barrier, there's no actual BAR request, which
 	 * in turn makes POSTFLUSH unnecessary.  Mask them off.
 	 */
-	if (!rq->hard_nr_sectors) {
+	if (!blk_rq_sectors(rq)) {
 		q->ordered &= ~(QUEUE_ORDERED_DO_BAR |
 				QUEUE_ORDERED_DO_POSTFLUSH);
 		/*
@@ -183,7 +181,7 @@ static inline bool start_ordered(struct request_queue *q, struct request **rqp)
 	}
 
 	/* stash away the original request */
-	elv_dequeue_request(q, rq);
+	blk_dequeue_request(rq);
 	q->orig_bar_rq = rq;
 	rq = NULL;
 
@@ -221,7 +219,7 @@ static inline bool start_ordered(struct request_queue *q, struct request **rqp)
 	} else
 		skip |= QUEUE_ORDSEQ_PREFLUSH;
 
-	if ((q->ordered & QUEUE_ORDERED_BY_DRAIN) && q->in_flight)
+	if ((q->ordered & QUEUE_ORDERED_BY_DRAIN) && queue_in_flight(q))
 		rq = NULL;
 	else
 		skip |= QUEUE_ORDSEQ_DRAIN;
@@ -251,10 +249,8 @@ bool blk_do_ordered(struct request_queue *q, struct request **rqp)
 			 * Queue ordering not supported.  Terminate
 			 * with prejudice.
 			 */
-			elv_dequeue_request(q, rq);
-			if (__blk_end_request(rq, -EOPNOTSUPP,
-					      blk_rq_bytes(rq)))
-				BUG();
+			blk_dequeue_request(rq);
+			__blk_end_request_all(rq, -EOPNOTSUPP);
 			*rqp = NULL;
 			return false;
 		}
@@ -290,88 +286,28 @@ static void bio_end_empty_barrier(struct bio *bio, int err)
 			set_bit(BIO_EOPNOTSUPP, &bio->bi_flags);
 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 	}
-
-	complete(bio->bi_private);
+	if (bio->bi_private)
+		complete(bio->bi_private);
+	bio_put(bio);
 }
 
 /**
  * blkdev_issue_flush - queue a flush
  * @bdev:	blockdev to issue flush for
+ * @gfp_mask:	memory allocation flags (for bio_alloc)
  * @error_sector:	error sector
+ * @flags:	BLKDEV_IFL_* flags to control behaviour
  *
  * Description:
  *    Issue a flush for the block device in question. Caller can supply
  *    room for storing the error offset in case of a flush error, if they
- *    wish to.
+ *    wish to. If WAIT flag is not passed then caller may check only what
+ *    request was pushed in some internal queue for later handling.
  */
-int blkdev_issue_flush(struct block_device *bdev, sector_t *error_sector)
+int blkdev_issue_flush(struct block_device *bdev, gfp_t gfp_mask,
+		sector_t *error_sector, unsigned long flags)
 {
 	DECLARE_COMPLETION_ONSTACK(wait);
-	struct request_queue *q;
-	struct bio *bio;
-	int ret;
-
-	if (bdev->bd_disk == NULL)
-		return -ENXIO;
-
-	q = bdev_get_queue(bdev);
-	if (!q)
-		return -ENXIO;
-
-	bio = bio_alloc(GFP_KERNEL, 0);
-	if (!bio)
-		return -ENOMEM;
-
-	bio->bi_end_io = bio_end_empty_barrier;
-	bio->bi_private = &wait;
-	bio->bi_bdev = bdev;
-	submit_bio(WRITE_BARRIER, bio);
-
-	wait_for_completion(&wait);
-
-	/*
-	 * The driver must store the error location in ->bi_sector, if
-	 * it supports it. For non-stacked drivers, this should be copied
-	 * from rq->sector.
-	 */
-	if (error_sector)
-		*error_sector = bio->bi_sector;
-
-	ret = 0;
-	if (bio_flagged(bio, BIO_EOPNOTSUPP))
-		ret = -EOPNOTSUPP;
-	else if (!bio_flagged(bio, BIO_UPTODATE))
-		ret = -EIO;
-
-	bio_put(bio);
-	return ret;
-}
-EXPORT_SYMBOL(blkdev_issue_flush);
-
-static void blkdev_discard_end_io(struct bio *bio, int err)
-{
-	if (err) {
-		if (err == -EOPNOTSUPP)
-			set_bit(BIO_EOPNOTSUPP, &bio->bi_flags);
-		clear_bit(BIO_UPTODATE, &bio->bi_flags);
-	}
-
-	bio_put(bio);
-}
-
-/**
- * blkdev_issue_discard - queue a discard
- * @bdev:	blockdev to issue discard for
- * @sector:	start sector
- * @nr_sects:	number of sectors to discard
- * @gfp_mask:	memory allocation flags (for bio_alloc)
- *
- * Description:
- *    Issue a discard request for the sectors in question. Does not wait.
- */
-int blkdev_issue_discard(struct block_device *bdev,
-			 sector_t sector, sector_t nr_sects, gfp_t gfp_mask)
-{
 	struct request_queue *q;
 	struct bio *bio;
 	int ret = 0;
@@ -383,37 +319,31 @@ int blkdev_issue_discard(struct block_device *bdev,
 	if (!q)
 		return -ENXIO;
 
-	if (!q->prepare_discard_fn)
-		return -EOPNOTSUPP;
+	bio = bio_alloc(gfp_mask, 0);
+	bio->bi_end_io = bio_end_empty_barrier;
+	bio->bi_bdev = bdev;
+	if (test_bit(BLKDEV_WAIT, &flags))
+		bio->bi_private = &wait;
 
-	while (nr_sects && !ret) {
-		bio = bio_alloc(gfp_mask, 0);
-		if (!bio)
-			return -ENOMEM;
-
-		bio->bi_end_io = blkdev_discard_end_io;
-		bio->bi_bdev = bdev;
-
-		bio->bi_sector = sector;
-
-		if (nr_sects > q->max_hw_sectors) {
-			bio->bi_size = q->max_hw_sectors << 9;
-			nr_sects -= q->max_hw_sectors;
-			sector += q->max_hw_sectors;
-		} else {
-			bio->bi_size = nr_sects << 9;
-			nr_sects = 0;
-		}
-		bio_get(bio);
-		submit_bio(DISCARD_BARRIER, bio);
-
-		/* Check if it failed immediately */
-		if (bio_flagged(bio, BIO_EOPNOTSUPP))
-			ret = -EOPNOTSUPP;
-		else if (!bio_flagged(bio, BIO_UPTODATE))
-			ret = -EIO;
-		bio_put(bio);
+	bio_get(bio);
+	submit_bio(WRITE_BARRIER, bio);
+	if (test_bit(BLKDEV_WAIT, &flags)) {
+		wait_for_completion(&wait);
+		/*
+		 * The driver must store the error location in ->bi_sector, if
+		 * it supports it. For non-stacked drivers, this should be
+		 * copied from blk_rq_pos(rq).
+		 */
+		if (error_sector)
+			*error_sector = bio->bi_sector;
 	}
+
+	if (bio_flagged(bio, BIO_EOPNOTSUPP))
+		ret = -EOPNOTSUPP;
+	else if (!bio_flagged(bio, BIO_UPTODATE))
+		ret = -EIO;
+
+	bio_put(bio);
 	return ret;
 }
-EXPORT_SYMBOL(blkdev_issue_discard);
+EXPORT_SYMBOL(blkdev_issue_flush);

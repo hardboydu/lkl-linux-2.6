@@ -11,10 +11,11 @@ int __vlan_hwaccel_rx(struct sk_buff *skb, struct vlan_group *grp,
 	if (netpoll_rx(skb))
 		return NET_RX_DROP;
 
-	if (skb_bond_should_drop(skb))
-		goto drop;
+	if (skb_bond_should_drop(skb, ACCESS_ONCE(skb->dev->master)))
+		skb->deliver_no_wcard = 1;
 
-	skb->vlan_tci = vlan_tci;
+	skb->skb_iif = skb->dev->ifindex;
+	__vlan_hwaccel_put_tag(skb, vlan_tci);
 	skb->dev = vlan_group_get_device(grp, vlan_tci & VLAN_VID_MASK);
 
 	if (!skb->dev)
@@ -31,7 +32,7 @@ EXPORT_SYMBOL(__vlan_hwaccel_rx);
 int vlan_hwaccel_do_receive(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
-	struct net_device_stats *stats;
+	struct vlan_rx_stats     *rx_stats;
 
 	skb->dev = vlan_dev_info(dev)->real_dev;
 	netif_nit_deliver(skb);
@@ -40,15 +41,17 @@ int vlan_hwaccel_do_receive(struct sk_buff *skb)
 	skb->priority = vlan_get_ingress_priority(dev, skb->vlan_tci);
 	skb->vlan_tci = 0;
 
-	stats = &dev->stats;
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
+	rx_stats = per_cpu_ptr(vlan_dev_info(dev)->vlan_rx_stats,
+			       smp_processor_id());
+
+	rx_stats->rx_packets++;
+	rx_stats->rx_bytes += skb->len;
 
 	switch (skb->pkt_type) {
 	case PACKET_BROADCAST:
 		break;
 	case PACKET_MULTICAST:
-		stats->multicast++;
+		rx_stats->multicast++;
 		break;
 	case PACKET_OTHERHOST:
 		/* Our lower layer thinks this is not local, let's make sure.
@@ -58,7 +61,7 @@ int vlan_hwaccel_do_receive(struct sk_buff *skb)
 					dev->dev_addr))
 			skb->pkt_type = PACKET_HOST;
 		break;
-	};
+	}
 	return 0;
 }
 
@@ -74,84 +77,63 @@ u16 vlan_dev_vlan_id(const struct net_device *dev)
 }
 EXPORT_SYMBOL(vlan_dev_vlan_id);
 
-static int vlan_gro_common(struct napi_struct *napi, struct vlan_group *grp,
-			   unsigned int vlan_tci, struct sk_buff *skb)
+static gro_result_t
+vlan_gro_common(struct napi_struct *napi, struct vlan_group *grp,
+		unsigned int vlan_tci, struct sk_buff *skb)
 {
 	struct sk_buff *p;
 
-	if (skb_bond_should_drop(skb))
-		goto drop;
+	if (skb_bond_should_drop(skb, ACCESS_ONCE(skb->dev->master)))
+		skb->deliver_no_wcard = 1;
 
-	skb->vlan_tci = vlan_tci;
+	skb->skb_iif = skb->dev->ifindex;
+	__vlan_hwaccel_put_tag(skb, vlan_tci);
 	skb->dev = vlan_group_get_device(grp, vlan_tci & VLAN_VID_MASK);
 
 	if (!skb->dev)
 		goto drop;
 
 	for (p = napi->gro_list; p; p = p->next) {
-		NAPI_GRO_CB(p)->same_flow = p->dev == skb->dev;
+		NAPI_GRO_CB(p)->same_flow =
+			p->dev == skb->dev && !compare_ether_header(
+				skb_mac_header(p), skb_gro_mac_header(skb));
 		NAPI_GRO_CB(p)->flush = 0;
 	}
 
 	return dev_gro_receive(napi, skb);
 
 drop:
-	return 2;
+	return GRO_DROP;
 }
 
-int vlan_gro_receive(struct napi_struct *napi, struct vlan_group *grp,
-		     unsigned int vlan_tci, struct sk_buff *skb)
+gro_result_t vlan_gro_receive(struct napi_struct *napi, struct vlan_group *grp,
+			      unsigned int vlan_tci, struct sk_buff *skb)
 {
-	int err = NET_RX_SUCCESS;
+	if (netpoll_rx_on(skb))
+		return vlan_hwaccel_receive_skb(skb, grp, vlan_tci)
+			? GRO_DROP : GRO_NORMAL;
 
-	if (netpoll_receive_skb(skb))
-		return NET_RX_DROP;
+	skb_gro_reset_offset(skb);
 
-	switch (vlan_gro_common(napi, grp, vlan_tci, skb)) {
-	case -1:
-		return netif_receive_skb(skb);
-
-	case 2:
-		err = NET_RX_DROP;
-		/* fall through */
-
-	case 1:
-		kfree_skb(skb);
-		break;
-	}
-
-	return err;
+	return napi_skb_finish(vlan_gro_common(napi, grp, vlan_tci, skb), skb);
 }
 EXPORT_SYMBOL(vlan_gro_receive);
 
-int vlan_gro_frags(struct napi_struct *napi, struct vlan_group *grp,
-		   unsigned int vlan_tci, struct napi_gro_fraginfo *info)
+gro_result_t vlan_gro_frags(struct napi_struct *napi, struct vlan_group *grp,
+			    unsigned int vlan_tci)
 {
-	struct sk_buff *skb = napi_fraginfo_skb(napi, info);
-	int err = NET_RX_DROP;
+	struct sk_buff *skb = napi_frags_skb(napi);
 
 	if (!skb)
-		goto out;
+		return GRO_DROP;
 
-	if (netpoll_receive_skb(skb))
-		goto out;
-
-	err = NET_RX_SUCCESS;
-
-	switch (vlan_gro_common(napi, grp, vlan_tci, skb)) {
-	case -1:
-		return netif_receive_skb(skb);
-
-	case 2:
-		err = NET_RX_DROP;
-		/* fall through */
-
-	case 1:
-		napi_reuse_skb(napi, skb);
-		break;
+	if (netpoll_rx_on(skb)) {
+		skb->protocol = eth_type_trans(skb, skb->dev);
+		return vlan_hwaccel_receive_skb(skb, grp, vlan_tci)
+			? GRO_DROP : GRO_NORMAL;
 	}
 
-out:
-	return err;
+	return napi_frags_finish(napi, skb,
+				 vlan_gro_common(napi, grp, vlan_tci, skb));
 }
 EXPORT_SYMBOL(vlan_gro_frags);

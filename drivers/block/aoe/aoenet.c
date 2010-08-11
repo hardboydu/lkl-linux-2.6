@@ -4,6 +4,7 @@
  * Ethernet portion of AoE driver
  */
 
+#include <linux/gfp.h>
 #include <linux/hdreg.h>
 #include <linux/blkdev.h>
 #include <linux/netdevice.h>
@@ -151,7 +152,7 @@ exit:
 	return 0;
 }
 
-static struct packet_type aoe_pt = {
+static struct packet_type aoe_pt __read_mostly = {
 	.type = __constant_htons(ETH_P_AOE),
 	.func = aoenet_rcv,
 };

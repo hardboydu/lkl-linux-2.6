@@ -16,19 +16,17 @@
 
 #include <linux/i2c/tps65010.h>
 
-#include <mach/mmc.h>
+#include <plat/mmc.h>
 #include <mach/gpio.h>
+
+#include "board-h3.h"
 
 #if defined(CONFIG_MMC_OMAP) || defined(CONFIG_MMC_OMAP_MODULE)
 
 static int mmc_set_power(struct device *dev, int slot, int power_on,
 				int vdd)
 {
-	if (power_on)
-		gpio_direction_output(H3_TPS_GPIO_MMC_PWR_EN, 1);
-	else
-		gpio_direction_output(H3_TPS_GPIO_MMC_PWR_EN, 0);
-
+	gpio_set_value(H3_TPS_GPIO_MMC_PWR_EN, power_on);
 	return 0;
 }
 

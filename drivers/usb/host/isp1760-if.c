@@ -3,6 +3,7 @@
  * Currently there is support for
  * - OpenFirmware
  * - PCI
+ * - PDEV (generic platform device centralized driver model)
  *
  * (c) 2007 Sebastian Siewior <bigeasy@linutronix.de>
  *
@@ -10,8 +11,10 @@
 
 #include <linux/usb.h>
 #include <linux/io.h>
+#include <linux/platform_device.h>
+#include <linux/usb/isp1760.h>
+#include <linux/usb/hcd.h>
 
-#include "../core/hcd.h"
 #include "isp1760-hcd.h"
 
 #ifdef CONFIG_PPC_OF
@@ -28,12 +31,12 @@ static int of_isp1760_probe(struct of_device *dev,
 		const struct of_device_id *match)
 {
 	struct usb_hcd *hcd;
-	struct device_node *dp = dev->node;
+	struct device_node *dp = dev->dev.of_node;
 	struct resource *res;
 	struct resource memory;
 	struct of_irq oirq;
 	int virq;
-	u64 res_len;
+	resource_size_t res_len;
 	int ret;
 	const unsigned int *prop;
 	unsigned int devflags = 0;
@@ -42,12 +45,11 @@ static int of_isp1760_probe(struct of_device *dev,
 	if (ret)
 		return -ENXIO;
 
-	res = request_mem_region(memory.start, memory.end - memory.start + 1,
-			dev_name(&dev->dev));
+	res_len = resource_size(&memory);
+
+	res = request_mem_region(memory.start, res_len, dev_name(&dev->dev));
 	if (!res)
 		return -EBUSY;
-
-	res_len = memory.end - memory.start + 1;
 
 	if (of_irq_map_one(dp, 0, &oirq)) {
 		ret = -ENODEV;
@@ -89,7 +91,7 @@ static int of_isp1760_probe(struct of_device *dev,
 	return ret;
 
 release_reg:
-	release_mem_region(memory.start, memory.end - memory.start + 1);
+	release_mem_region(memory.start, res_len);
 	return ret;
 }
 
@@ -106,7 +108,7 @@ static int of_isp1760_remove(struct of_device *dev)
 	return 0;
 }
 
-static struct of_device_id of_isp1760_match[] = {
+static const struct of_device_id of_isp1760_match[] = {
 	{
 		.compatible = "nxp,usb-isp1760",
 	},
@@ -118,8 +120,11 @@ static struct of_device_id of_isp1760_match[] = {
 MODULE_DEVICE_TABLE(of, of_isp1760_match);
 
 static struct of_platform_driver isp1760_of_driver = {
-	.name           = "nxp-isp1760",
-	.match_table    = of_isp1760_match,
+	.driver = {
+		.name = "nxp-isp1760",
+		.owner = THIS_MODULE,
+		.of_match_table = of_isp1760_match,
+	},
 	.probe          = of_isp1760_probe,
 	.remove         = of_isp1760_remove,
 };
@@ -300,39 +305,118 @@ static struct pci_driver isp1761_pci_driver = {
 };
 #endif
 
+static int __devinit isp1760_plat_probe(struct platform_device *pdev)
+{
+	int ret = 0;
+	struct usb_hcd *hcd;
+	struct resource *mem_res;
+	struct resource *irq_res;
+	resource_size_t mem_size;
+	struct isp1760_platform_data *priv = pdev->dev.platform_data;
+	unsigned int devflags = 0;
+	unsigned long irqflags = IRQF_SHARED | IRQF_DISABLED;
+
+	mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!mem_res) {
+		pr_warning("isp1760: Memory resource not available\n");
+		ret = -ENODEV;
+		goto out;
+	}
+	mem_size = resource_size(mem_res);
+	if (!request_mem_region(mem_res->start, mem_size, "isp1760")) {
+		pr_warning("isp1760: Cannot reserve the memory resource\n");
+		ret = -EBUSY;
+		goto out;
+	}
+
+	irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!irq_res) {
+		pr_warning("isp1760: IRQ resource not available\n");
+		return -ENODEV;
+	}
+	irqflags |= irq_res->flags & IRQF_TRIGGER_MASK;
+
+	if (priv) {
+		if (priv->is_isp1761)
+			devflags |= ISP1760_FLAG_ISP1761;
+		if (priv->bus_width_16)
+			devflags |= ISP1760_FLAG_BUS_WIDTH_16;
+		if (priv->port1_otg)
+			devflags |= ISP1760_FLAG_OTG_EN;
+		if (priv->analog_oc)
+			devflags |= ISP1760_FLAG_ANALOG_OC;
+		if (priv->dack_polarity_high)
+			devflags |= ISP1760_FLAG_DACK_POL_HIGH;
+		if (priv->dreq_polarity_high)
+			devflags |= ISP1760_FLAG_DREQ_POL_HIGH;
+	}
+
+	hcd = isp1760_register(mem_res->start, mem_size, irq_res->start,
+			       irqflags, &pdev->dev, dev_name(&pdev->dev), devflags);
+	if (IS_ERR(hcd)) {
+		pr_warning("isp1760: Failed to register the HCD device\n");
+		ret = -ENODEV;
+		goto cleanup;
+	}
+
+	pr_info("ISP1760 USB device initialised\n");
+	return ret;
+
+cleanup:
+	release_mem_region(mem_res->start, mem_size);
+out:
+	return ret;
+}
+
+static int __devexit isp1760_plat_remove(struct platform_device *pdev)
+{
+	struct resource *mem_res;
+	resource_size_t mem_size;
+
+	mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	mem_size = resource_size(mem_res);
+	release_mem_region(mem_res->start, mem_size);
+
+	return 0;
+}
+
+static struct platform_driver isp1760_plat_driver = {
+	.probe	= isp1760_plat_probe,
+	.remove	= __devexit_p(isp1760_plat_remove),
+	.driver	= {
+		.name	= "isp1760",
+	},
+};
+
 static int __init isp1760_init(void)
 {
-	int ret;
+	int ret, any_ret = -ENODEV;
 
 	init_kmem_once();
 
+	ret = platform_driver_register(&isp1760_plat_driver);
+	if (!ret)
+		any_ret = 0;
 #ifdef CONFIG_PPC_OF
 	ret = of_register_platform_driver(&isp1760_of_driver);
-	if (ret) {
-		deinit_kmem_cache();
-		return ret;
-	}
+	if (!ret)
+		any_ret = 0;
 #endif
 #ifdef CONFIG_PCI
 	ret = pci_register_driver(&isp1761_pci_driver);
-	if (ret)
-		goto unreg_of;
+	if (!ret)
+		any_ret = 0;
 #endif
-	return ret;
 
-#ifdef CONFIG_PCI
-unreg_of:
-#endif
-#ifdef CONFIG_PPC_OF
-	of_unregister_platform_driver(&isp1760_of_driver);
-#endif
-	deinit_kmem_cache();
-	return ret;
+	if (any_ret)
+		deinit_kmem_cache();
+	return any_ret;
 }
 module_init(isp1760_init);
 
 static void __exit isp1760_exit(void)
 {
+	platform_driver_unregister(&isp1760_plat_driver);
 #ifdef CONFIG_PPC_OF
 	of_unregister_platform_driver(&isp1760_of_driver);
 #endif

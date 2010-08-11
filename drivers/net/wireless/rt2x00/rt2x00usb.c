@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2008 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2009 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -25,6 +25,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 #include <linux/bug.h>
 
@@ -47,6 +48,8 @@ int rt2x00usb_vendor_request(struct rt2x00_dev *rt2x00dev,
 	    (requesttype == USB_VENDOR_REQUEST_IN) ?
 	    usb_rcvctrlpipe(usb_dev, 0) : usb_sndctrlpipe(usb_dev, 0);
 
+	if (!test_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags))
+		return -ENODEV;
 
 	for (i = 0; i < REGISTER_BUSY_COUNT; i++) {
 		status = usb_control_msg(usb_dev, pipe, request, requesttype,
@@ -60,8 +63,10 @@ int rt2x00usb_vendor_request(struct rt2x00_dev *rt2x00dev,
 		 * -ENODEV: Device has disappeared, no point continuing.
 		 * All other errors: Try again.
 		 */
-		else if (status == -ENODEV)
+		else if (status == -ENODEV) {
+			clear_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags);
 			break;
+		}
 	}
 
 	ERROR(rt2x00dev,
@@ -156,10 +161,13 @@ EXPORT_SYMBOL_GPL(rt2x00usb_vendor_request_large_buff);
 
 int rt2x00usb_regbusy_read(struct rt2x00_dev *rt2x00dev,
 			   const unsigned int offset,
-			   struct rt2x00_field32 field,
+			   const struct rt2x00_field32 field,
 			   u32 *reg)
 {
 	unsigned int i;
+
+	if (!test_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags))
+		return -ENODEV;
 
 	for (i = 0; i < REGISTER_BUSY_COUNT; i++) {
 		rt2x00usb_register_read_lock(rt2x00dev, offset, reg);
@@ -208,12 +216,12 @@ static void rt2x00usb_interrupt_txdone(struct urb *urb)
 	rt2x00lib_txdone(entry, &txdesc);
 }
 
-int rt2x00usb_write_tx_data(struct queue_entry *entry)
+int rt2x00usb_write_tx_data(struct queue_entry *entry,
+			    struct txentry_desc *txdesc)
 {
 	struct rt2x00_dev *rt2x00dev = entry->queue->rt2x00dev;
 	struct usb_device *usb_dev = to_usb_device_intf(rt2x00dev->dev);
 	struct queue_entry_priv_usb *entry_priv = entry->priv_data;
-	struct skb_frame_desc *skbdesc;
 	u32 length;
 
 	/*
@@ -221,13 +229,6 @@ int rt2x00usb_write_tx_data(struct queue_entry *entry)
 	 */
 	skb_push(entry->skb, entry->queue->desc_size);
 	memset(entry->skb->data, 0, entry->queue->desc_size);
-
-	/*
-	 * Fill in skb descriptor
-	 */
-	skbdesc = get_skb_frame_desc(entry->skb);
-	skbdesc->desc = entry->skb->data;
-	skbdesc->desc_len = entry->queue->desc_size;
 
 	/*
 	 * USB devices cannot blindly pass the skb->len as the
@@ -296,6 +297,41 @@ void rt2x00usb_kick_tx_queue(struct rt2x00_dev *rt2x00dev,
 }
 EXPORT_SYMBOL_GPL(rt2x00usb_kick_tx_queue);
 
+void rt2x00usb_kill_tx_queue(struct rt2x00_dev *rt2x00dev,
+			     const enum data_queue_qid qid)
+{
+	struct data_queue *queue = rt2x00queue_get_queue(rt2x00dev, qid);
+	struct queue_entry_priv_usb *entry_priv;
+	struct queue_entry_priv_usb_bcn *bcn_priv;
+	unsigned int i;
+	bool kill_guard;
+
+	/*
+	 * When killing the beacon queue, we must also kill
+	 * the beacon guard byte.
+	 */
+	kill_guard =
+	    (qid == QID_BEACON) &&
+	    (test_bit(DRIVER_REQUIRE_BEACON_GUARD, &rt2x00dev->flags));
+
+	/*
+	 * Cancel all entries.
+	 */
+	for (i = 0; i < queue->limit; i++) {
+		entry_priv = queue->entries[i].priv_data;
+		usb_kill_urb(entry_priv->urb);
+
+		/*
+		 * Kill guardian urb (if required by driver).
+		 */
+		if (kill_guard) {
+			bcn_priv = queue->entries[i].priv_data;
+			usb_kill_urb(bcn_priv->guardian_urb);
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(rt2x00usb_kill_tx_queue);
+
 /*
  * RX data handlers.
  */
@@ -338,35 +374,14 @@ static void rt2x00usb_interrupt_rxdone(struct urb *urb)
  */
 void rt2x00usb_disable_radio(struct rt2x00_dev *rt2x00dev)
 {
-	struct queue_entry_priv_usb *entry_priv;
-	struct queue_entry_priv_usb_bcn *bcn_priv;
-	struct data_queue *queue;
-	unsigned int i;
-
 	rt2x00usb_vendor_request_sw(rt2x00dev, USB_RX_CONTROL, 0, 0,
 				    REGISTER_TIMEOUT);
 
 	/*
-	 * Cancel all queues.
+	 * The USB version of kill_tx_queue also works
+	 * on the RX queue.
 	 */
-	queue_for_each(rt2x00dev, queue) {
-		for (i = 0; i < queue->limit; i++) {
-			entry_priv = queue->entries[i].priv_data;
-			usb_kill_urb(entry_priv->urb);
-		}
-	}
-
-	/*
-	 * Kill guardian urb (if required by driver).
-	 */
-	if (!test_bit(DRIVER_REQUIRE_BEACON_GUARD, &rt2x00dev->flags))
-		return;
-
-	for (i = 0; i < rt2x00dev->bcn->limit; i++) {
-		bcn_priv = rt2x00dev->bcn->entries[i].priv_data;
-		if (bcn_priv->guardian_urb)
-			usb_kill_urb(bcn_priv->guardian_urb);
-	}
+	rt2x00dev->ops->lib->kill_tx_queue(rt2x00dev, QID_RX);
 }
 EXPORT_SYMBOL_GPL(rt2x00usb_disable_radio);
 
@@ -632,6 +647,8 @@ int rt2x00usb_probe(struct usb_interface *usb_intf,
 	rt2x00dev->ops = ops;
 	rt2x00dev->hw = hw;
 
+	rt2x00_set_chip_intf(rt2x00dev, RT2X00_CHIP_INTF_USB);
+
 	retval = rt2x00usb_alloc_reg(rt2x00dev);
 	if (retval)
 		goto exit_free_device;
@@ -688,8 +705,6 @@ int rt2x00usb_suspend(struct usb_interface *usb_intf, pm_message_t state)
 	if (retval)
 		return retval;
 
-	rt2x00usb_free_reg(rt2x00dev);
-
 	/*
 	 * Decrease usbdev refcount.
 	 */
@@ -703,24 +718,10 @@ int rt2x00usb_resume(struct usb_interface *usb_intf)
 {
 	struct ieee80211_hw *hw = usb_get_intfdata(usb_intf);
 	struct rt2x00_dev *rt2x00dev = hw->priv;
-	int retval;
 
 	usb_get_dev(interface_to_usbdev(usb_intf));
 
-	retval = rt2x00usb_alloc_reg(rt2x00dev);
-	if (retval)
-		return retval;
-
-	retval = rt2x00lib_resume(rt2x00dev);
-	if (retval)
-		goto exit_free_reg;
-
-	return 0;
-
-exit_free_reg:
-	rt2x00usb_free_reg(rt2x00dev);
-
-	return retval;
+	return rt2x00lib_resume(rt2x00dev);
 }
 EXPORT_SYMBOL_GPL(rt2x00usb_resume);
 #endif /* CONFIG_PM */

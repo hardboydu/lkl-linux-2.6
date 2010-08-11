@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/parser.h>
@@ -47,7 +48,6 @@ struct file_system_type afs_fs_type = {
 static const struct super_operations afs_super_ops = {
 	.statfs		= afs_statfs,
 	.alloc_inode	= afs_alloc_inode,
-	.write_inode	= afs_write_inode,
 	.destroy_inode	= afs_destroy_inode,
 	.clear_inode	= afs_clear_inode,
 	.put_super	= afs_put_super,
@@ -311,6 +311,7 @@ static int afs_fill_super(struct super_block *sb, void *data)
 	sb->s_magic		= AFS_FS_MAGIC;
 	sb->s_op		= &afs_super_ops;
 	sb->s_fs_info		= as;
+	sb->s_bdi		= &as->volume->bdi;
 
 	/* allocate the root inode and dentry */
 	fid.vid		= as->volume->vid;
@@ -405,21 +406,20 @@ static int afs_get_sb(struct file_system_type *fs_type,
 		sb->s_flags = flags;
 		ret = afs_fill_super(sb, &params);
 		if (ret < 0) {
-			up_write(&sb->s_umount);
-			deactivate_super(sb);
+			deactivate_locked_super(sb);
 			goto error;
 		}
-		sb->s_options = new_opts;
+		save_mount_options(sb, new_opts);
 		sb->s_flags |= MS_ACTIVE;
 	} else {
 		_debug("reuse");
-		kfree(new_opts);
 		ASSERTCMP(sb->s_flags, &, MS_ACTIVE);
 	}
 
 	simple_set_mnt(mnt, sb);
 	afs_put_volume(params.volume);
 	afs_put_cell(params.cell);
+	kfree(new_opts);
 	_leave(" = 0 [%p]", sb);
 	return 0;
 
@@ -441,7 +441,11 @@ static void afs_put_super(struct super_block *sb)
 
 	_enter("");
 
+	lock_kernel();
+
 	afs_put_volume(as->volume);
+
+	unlock_kernel();
 
 	_leave("");
 }

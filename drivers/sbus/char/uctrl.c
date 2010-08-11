@@ -197,9 +197,8 @@ static struct uctrl_driver {
 static void uctrl_get_event_status(struct uctrl_driver *);
 static void uctrl_get_external_status(struct uctrl_driver *);
 
-static int
-uctrl_ioctl(struct inode *inode, struct file *file,
-	      unsigned int cmd, unsigned long arg)
+static long
+uctrl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
 		default:
@@ -226,7 +225,7 @@ static irqreturn_t uctrl_interrupt(int irq, void *dev_id)
 static const struct file_operations uctrl_fops = {
 	.owner =	THIS_MODULE,
 	.llseek =	no_llseek,
-	.ioctl =	uctrl_ioctl,
+	.unlocked_ioctl =	uctrl_ioctl,
 	.open =		uctrl_open,
 };
 
@@ -383,7 +382,7 @@ static int __devinit uctrl_probe(struct of_device *op,
 
 	sbus_writel(UCTRL_INTR_RXNE_REQ|UCTRL_INTR_RXNE_MSK, &p->regs->uctrl_intr);
 	printk(KERN_INFO "%s: uctrl regs[0x%p] (irq %d)\n",
-	       op->node->full_name, p->regs, p->irq);
+	       op->dev.of_node->full_name, p->regs, p->irq);
 	uctrl_get_event_status(p);
 	uctrl_get_external_status(p);
 
@@ -426,8 +425,11 @@ static const struct of_device_id uctrl_match[] = {
 MODULE_DEVICE_TABLE(of, uctrl_match);
 
 static struct of_platform_driver uctrl_driver = {
-	.name		= "uctrl",
-	.match_table	= uctrl_match,
+	.driver = {
+		.name = "uctrl",
+		.owner = THIS_MODULE,
+		.of_match_table = uctrl_match,
+	},
 	.probe		= uctrl_probe,
 	.remove		= __devexit_p(uctrl_remove),
 };

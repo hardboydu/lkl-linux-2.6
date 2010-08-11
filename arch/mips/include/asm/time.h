@@ -57,7 +57,11 @@ extern int r4k_clockevent_init(void);
 
 static inline int mips_clockevent_init(void)
 {
-#ifdef CONFIG_CEVT_R4K
+#ifdef CONFIG_MIPS_MT_SMTC
+	extern int smtc_clockevent_init(void);
+
+	return smtc_clockevent_init();
+#elif defined(CONFIG_CEVT_R4K)
 	return r4k_clockevent_init();
 #else
 	return -ENXIO;
@@ -80,8 +84,16 @@ static inline int init_mips_clocksource(void)
 #endif
 }
 
-extern void clocksource_set_clock(struct clocksource *cs, unsigned int clock);
-extern void clockevent_set_clock(struct clock_event_device *cd,
-		unsigned int clock);
+static inline void clocksource_set_clock(struct clocksource *cs,
+					 unsigned int clock)
+{
+	clocksource_calc_mult_shift(cs, clock, 4);
+}
+
+static inline void clockevent_set_clock(struct clock_event_device *cd,
+					unsigned int clock)
+{
+	clockevents_calc_mult_shift(cd, clock, 4);
+}
 
 #endif /* _ASM_TIME_H */

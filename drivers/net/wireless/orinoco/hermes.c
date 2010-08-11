@@ -15,7 +15,7 @@
  *
  * Copyright (C) 2000, David Gibson, Linuxcare Australia.
  * (C) Copyright David Gibson, IBM Corp. 2001-2003.
- * 
+ *
  * The contents of this file are subject to the Mozilla Public License
  * Version 1.1 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License
@@ -45,11 +45,6 @@
 
 #include "hermes.h"
 
-MODULE_DESCRIPTION("Low-level driver helper for Lucent Hermes chipset and Prism II HFA384x wireless MAC controller");
-MODULE_AUTHOR("Pavel Roskin <proski@gnu.org>"
-	" & David Gibson <hermes@gibson.dropbear.id.au>");
-MODULE_LICENSE("Dual MPL/GPL");
-
 /* These are maximum timeouts. Most often, card wil react much faster */
 #define CMD_BUSY_TIMEOUT (100) /* In iterations of ~1us */
 #define CMD_INIT_TIMEOUT (50000) /* in iterations of ~10us */
@@ -57,17 +52,37 @@ MODULE_LICENSE("Dual MPL/GPL");
 #define ALLOC_COMPL_TIMEOUT (1000) /* in iterations of ~10us */
 
 /*
+ * AUX port access.  To unlock the AUX port write the access keys to the
+ * PARAM0-2 registers, then write HERMES_AUX_ENABLE to the HERMES_CONTROL
+ * register.  Then read it and make sure it's HERMES_AUX_ENABLED.
+ */
+#define HERMES_AUX_ENABLE	0x8000	/* Enable auxiliary port access */
+#define HERMES_AUX_DISABLE	0x4000	/* Disable to auxiliary port access */
+#define HERMES_AUX_ENABLED	0xC000	/* Auxiliary port is open */
+#define HERMES_AUX_DISABLED	0x0000	/* Auxiliary port is closed */
+
+#define HERMES_AUX_PW0	0xFE01
+#define HERMES_AUX_PW1	0xDC23
+#define HERMES_AUX_PW2	0xBA45
+
+/* HERMES_CMD_DOWNLD */
+#define HERMES_PROGRAM_DISABLE             (0x0000 | HERMES_CMD_DOWNLD)
+#define HERMES_PROGRAM_ENABLE_VOLATILE     (0x0100 | HERMES_CMD_DOWNLD)
+#define HERMES_PROGRAM_ENABLE_NON_VOLATILE (0x0200 | HERMES_CMD_DOWNLD)
+#define HERMES_PROGRAM_NON_VOLATILE        (0x0300 | HERMES_CMD_DOWNLD)
+
+/*
  * Debugging helpers
  */
 
 #define DMSG(stuff...) do {printk(KERN_DEBUG "hermes @ %p: " , hw->iobase); \
-			printk(stuff);} while (0)
+			printk(stuff); } while (0)
 
 #undef HERMES_DEBUG
 #ifdef HERMES_DEBUG
 #include <stdarg.h>
 
-#define DEBUG(lvl, stuff...) if ( (lvl) <= HERMES_DEBUG) DMSG(stuff)
+#define DEBUG(lvl, stuff...) if ((lvl) <= HERMES_DEBUG) DMSG(stuff)
 
 #else /* ! HERMES_DEBUG */
 
@@ -75,6 +90,7 @@ MODULE_LICENSE("Dual MPL/GPL");
 
 #endif /* ! HERMES_DEBUG */
 
+static const struct hermes_ops hermes_ops_local;
 
 /*
  * Internal functions
@@ -95,20 +111,19 @@ static int hermes_issue_cmd(hermes_t *hw, u16 cmd, u16 param0,
 
 	/* First wait for the command register to unbusy */
 	reg = hermes_read_regn(hw, CMD);
-	while ( (reg & HERMES_CMD_BUSY) && k ) {
+	while ((reg & HERMES_CMD_BUSY) && k) {
 		k--;
 		udelay(1);
 		reg = hermes_read_regn(hw, CMD);
 	}
-	if (reg & HERMES_CMD_BUSY) {
+	if (reg & HERMES_CMD_BUSY)
 		return -EBUSY;
-	}
 
 	hermes_write_regn(hw, PARAM2, param2);
 	hermes_write_regn(hw, PARAM1, param1);
 	hermes_write_regn(hw, PARAM0, param0);
 	hermes_write_regn(hw, CMD, cmd);
-	
+
 	return 0;
 }
 
@@ -117,9 +132,9 @@ static int hermes_issue_cmd(hermes_t *hw, u16 cmd, u16 param0,
  */
 
 /* For doing cmds that wipe the magic constant in SWSUPPORT0 */
-int hermes_doicmd_wait(hermes_t *hw, u16 cmd,
-		       u16 parm0, u16 parm1, u16 parm2,
-		       struct hermes_response *resp)
+static int hermes_doicmd_wait(hermes_t *hw, u16 cmd,
+			      u16 parm0, u16 parm1, u16 parm2,
+			      struct hermes_response *resp)
 {
 	int err = 0;
 	int k;
@@ -169,17 +184,18 @@ int hermes_doicmd_wait(hermes_t *hw, u16 cmd,
 out:
 	return err;
 }
-EXPORT_SYMBOL(hermes_doicmd_wait);
 
 void hermes_struct_init(hermes_t *hw, void __iomem *address, int reg_spacing)
 {
 	hw->iobase = address;
 	hw->reg_spacing = reg_spacing;
 	hw->inten = 0x0;
+	hw->eeprom_pda = false;
+	hw->ops = &hermes_ops_local;
 }
 EXPORT_SYMBOL(hermes_struct_init);
 
-int hermes_init(hermes_t *hw)
+static int hermes_init(hermes_t *hw)
 {
 	u16 reg;
 	int err = 0;
@@ -191,23 +207,23 @@ int hermes_init(hermes_t *hw)
 	hermes_write_regn(hw, EVACK, 0xffff);
 
 	/* Normally it's a "can't happen" for the command register to
-           be busy when we go to issue a command because we are
-           serializing all commands.  However we want to have some
-           chance of resetting the card even if it gets into a stupid
-           state, so we actually wait to see if the command register
-           will unbusy itself here. */
+	   be busy when we go to issue a command because we are
+	   serializing all commands.  However we want to have some
+	   chance of resetting the card even if it gets into a stupid
+	   state, so we actually wait to see if the command register
+	   will unbusy itself here. */
 	k = CMD_BUSY_TIMEOUT;
 	reg = hermes_read_regn(hw, CMD);
 	while (k && (reg & HERMES_CMD_BUSY)) {
-		if (reg == 0xffff) /* Special case - the card has probably been removed,
-				      so don't wait for the timeout */
+		if (reg == 0xffff) /* Special case - the card has probably been
+				      removed, so don't wait for the timeout */
 			return -ENODEV;
 
 		k--;
 		udelay(1);
 		reg = hermes_read_regn(hw, CMD);
 	}
-	
+
 	/* No need to explicitly handle the timeout - if we've timed
 	   out hermes_issue_cmd() will probably return -EBUSY below */
 
@@ -223,16 +239,18 @@ int hermes_init(hermes_t *hw)
 
 	return err;
 }
-EXPORT_SYMBOL(hermes_init);
 
 /* Issue a command to the chip, and (busy!) wait for it to
  * complete.
  *
- * Returns: < 0 on internal error, 0 on success, > 0 on error returned by the firmware
+ * Returns:
+ *     < 0 on internal error
+ *       0 on success
+ *     > 0 on error returned by the firmware
  *
  * Callable from any context, but locking is your problem. */
-int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
-		      struct hermes_response *resp)
+static int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
+			     struct hermes_response *resp)
 {
 	int err;
 	int k;
@@ -241,13 +259,13 @@ int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
 
 	err = hermes_issue_cmd(hw, cmd, parm0, 0, 0);
 	if (err) {
-		if (! hermes_present(hw)) {
+		if (!hermes_present(hw)) {
 			if (net_ratelimit())
 				printk(KERN_WARNING "hermes @ %p: "
 				       "Card removed while issuing command "
 				       "0x%04x.\n", hw->iobase, cmd);
 			err = -ENODEV;
-		} else 
+		} else
 			if (net_ratelimit())
 				printk(KERN_ERR "hermes @ %p: "
 				       "Error %d issuing command 0x%04x.\n",
@@ -257,21 +275,21 @@ int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
 
 	reg = hermes_read_regn(hw, EVSTAT);
 	k = CMD_COMPL_TIMEOUT;
-	while ( (! (reg & HERMES_EV_CMD)) && k) {
+	while ((!(reg & HERMES_EV_CMD)) && k) {
 		k--;
 		udelay(10);
 		reg = hermes_read_regn(hw, EVSTAT);
 	}
 
-	if (! hermes_present(hw)) {
+	if (!hermes_present(hw)) {
 		printk(KERN_WARNING "hermes @ %p: Card removed "
 		       "while waiting for command 0x%04x completion.\n",
 		       hw->iobase, cmd);
 		err = -ENODEV;
 		goto out;
 	}
-		
-	if (! (reg & HERMES_EV_CMD)) {
+
+	if (!(reg & HERMES_EV_CMD)) {
 		printk(KERN_ERR "hermes @ %p: Timeout waiting for "
 		       "command 0x%04x completion.\n", hw->iobase, cmd);
 		err = -ETIMEDOUT;
@@ -294,38 +312,36 @@ int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
  out:
 	return err;
 }
-EXPORT_SYMBOL(hermes_docmd_wait);
 
-int hermes_allocate(hermes_t *hw, u16 size, u16 *fid)
+static int hermes_allocate(hermes_t *hw, u16 size, u16 *fid)
 {
 	int err = 0;
 	int k;
 	u16 reg;
-	
-	if ( (size < HERMES_ALLOC_LEN_MIN) || (size > HERMES_ALLOC_LEN_MAX) )
+
+	if ((size < HERMES_ALLOC_LEN_MIN) || (size > HERMES_ALLOC_LEN_MAX))
 		return -EINVAL;
 
 	err = hermes_docmd_wait(hw, HERMES_CMD_ALLOC, size, NULL);
-	if (err) {
+	if (err)
 		return err;
-	}
 
 	reg = hermes_read_regn(hw, EVSTAT);
 	k = ALLOC_COMPL_TIMEOUT;
-	while ( (! (reg & HERMES_EV_ALLOC)) && k) {
+	while ((!(reg & HERMES_EV_ALLOC)) && k) {
 		k--;
 		udelay(10);
 		reg = hermes_read_regn(hw, EVSTAT);
 	}
-	
-	if (! hermes_present(hw)) {
+
+	if (!hermes_present(hw)) {
 		printk(KERN_WARNING "hermes @ %p: "
 		       "Card removed waiting for frame allocation.\n",
 		       hw->iobase);
 		return -ENODEV;
 	}
-		
-	if (! (reg & HERMES_EV_ALLOC)) {
+
+	if (!(reg & HERMES_EV_ALLOC)) {
 		printk(KERN_ERR "hermes @ %p: "
 		       "Timeout waiting for frame allocation\n",
 		       hw->iobase);
@@ -334,14 +350,16 @@ int hermes_allocate(hermes_t *hw, u16 size, u16 *fid)
 
 	*fid = hermes_read_regn(hw, ALLOCFID);
 	hermes_write_regn(hw, EVACK, HERMES_EV_ALLOC);
-	
+
 	return 0;
 }
-EXPORT_SYMBOL(hermes_allocate);
 
 /* Set up a BAP to read a particular chunk of data from card's internal buffer.
  *
- * Returns: < 0 on internal failure (errno), 0 on success, >0 on error
+ * Returns:
+ *     < 0 on internal failure (errno)
+ *       0 on success
+ *     > 0 on error
  * from firmware
  *
  * Callable from any context */
@@ -353,7 +371,7 @@ static int hermes_bap_seek(hermes_t *hw, int bap, u16 id, u16 offset)
 	u16 reg;
 
 	/* Paranoia.. */
-	if ( (offset > HERMES_BAP_OFFSET_MAX) || (offset % 2) )
+	if ((offset > HERMES_BAP_OFFSET_MAX) || (offset % 2))
 		return -EINVAL;
 
 	k = HERMES_BAP_BUSY_TIMEOUT;
@@ -374,7 +392,7 @@ static int hermes_bap_seek(hermes_t *hw, int bap, u16 id, u16 offset)
 	/* Wait for the BAP to be ready */
 	k = HERMES_BAP_BUSY_TIMEOUT;
 	reg = hermes_read_reg(hw, oreg);
-	while ( (reg & (HERMES_OFFSET_BUSY | HERMES_OFFSET_ERR)) && k) {
+	while ((reg & (HERMES_OFFSET_BUSY | HERMES_OFFSET_ERR)) && k) {
 		k--;
 		udelay(1);
 		reg = hermes_read_reg(hw, oreg);
@@ -386,9 +404,8 @@ static int hermes_bap_seek(hermes_t *hw, int bap, u16 id, u16 offset)
 		       (reg & HERMES_OFFSET_BUSY) ? "timeout" : "error",
 		       reg, id, offset);
 
-		if (reg & HERMES_OFFSET_BUSY) {
+		if (reg & HERMES_OFFSET_BUSY)
 			return -ETIMEDOUT;
-		}
 
 		return -EIO;		/* error or wrong offset */
 	}
@@ -400,15 +417,18 @@ static int hermes_bap_seek(hermes_t *hw, int bap, u16 id, u16 offset)
  * BAP. Synchronization/serialization is the caller's problem.  len
  * must be even.
  *
- * Returns: < 0 on internal failure (errno), 0 on success, > 0 on error from firmware
+ * Returns:
+ *     < 0 on internal failure (errno)
+ *       0 on success
+ *     > 0 on error from firmware
  */
-int hermes_bap_pread(hermes_t *hw, int bap, void *buf, int len,
-		     u16 id, u16 offset)
+static int hermes_bap_pread(hermes_t *hw, int bap, void *buf, int len,
+			    u16 id, u16 offset)
 {
 	int dreg = bap ? HERMES_DATA1 : HERMES_DATA0;
 	int err = 0;
 
-	if ( (len < 0) || (len % 2) )
+	if ((len < 0) || (len % 2))
 		return -EINVAL;
 
 	err = hermes_bap_seek(hw, bap, id, offset);
@@ -421,15 +441,17 @@ int hermes_bap_pread(hermes_t *hw, int bap, void *buf, int len,
  out:
 	return err;
 }
-EXPORT_SYMBOL(hermes_bap_pread);
 
 /* Write a block of data to the chip's buffer, via the
  * BAP. Synchronization/serialization is the caller's problem.
  *
- * Returns: < 0 on internal failure (errno), 0 on success, > 0 on error from firmware
+ * Returns:
+ *     < 0 on internal failure (errno)
+ *       0 on success
+ *     > 0 on error from firmware
  */
-int hermes_bap_pwrite(hermes_t *hw, int bap, const void *buf, int len,
-		      u16 id, u16 offset)
+static int hermes_bap_pwrite(hermes_t *hw, int bap, const void *buf, int len,
+			     u16 id, u16 offset)
 {
 	int dreg = bap ? HERMES_DATA1 : HERMES_DATA0;
 	int err = 0;
@@ -440,14 +462,13 @@ int hermes_bap_pwrite(hermes_t *hw, int bap, const void *buf, int len,
 	err = hermes_bap_seek(hw, bap, id, offset);
 	if (err)
 		goto out;
-	
+
 	/* Actually do the transfer */
 	hermes_write_bytes(hw, dreg, buf, len);
 
- out:	
+ out:
 	return err;
 }
-EXPORT_SYMBOL(hermes_bap_pwrite);
 
 /* Read a Length-Type-Value record from the card.
  *
@@ -457,15 +478,15 @@ EXPORT_SYMBOL(hermes_bap_pwrite);
  * practice.
  *
  * Callable from user or bh context.  */
-int hermes_read_ltv(hermes_t *hw, int bap, u16 rid, unsigned bufsize,
-		    u16 *length, void *buf)
+static int hermes_read_ltv(hermes_t *hw, int bap, u16 rid, unsigned bufsize,
+			   u16 *length, void *buf)
 {
 	int err = 0;
 	int dreg = bap ? HERMES_DATA1 : HERMES_DATA0;
 	u16 rlength, rtype;
 	unsigned nwords;
 
-	if ( (bufsize < 0) || (bufsize % 2) )
+	if (bufsize % 2)
 		return -EINVAL;
 
 	err = hermes_docmd_wait(hw, HERMES_CMD_ACCESS, rid, NULL);
@@ -478,7 +499,7 @@ int hermes_read_ltv(hermes_t *hw, int bap, u16 rid, unsigned bufsize,
 
 	rlength = hermes_read_reg(hw, dreg);
 
-	if (! rlength)
+	if (!rlength)
 		return -ENODATA;
 
 	rtype = hermes_read_reg(hw, dreg);
@@ -501,10 +522,9 @@ int hermes_read_ltv(hermes_t *hw, int bap, u16 rid, unsigned bufsize,
 
 	return 0;
 }
-EXPORT_SYMBOL(hermes_read_ltv);
 
-int hermes_write_ltv(hermes_t *hw, int bap, u16 rid, 
-		     u16 length, const void *value)
+static int hermes_write_ltv(hermes_t *hw, int bap, u16 rid,
+			    u16 length, const void *value)
 {
 	int dreg = bap ? HERMES_DATA1 : HERMES_DATA0;
 	int err = 0;
@@ -529,16 +549,228 @@ int hermes_write_ltv(hermes_t *hw, int bap, u16 rid,
 
 	return err;
 }
-EXPORT_SYMBOL(hermes_write_ltv);
 
-static int __init init_hermes(void)
+/*** Hermes AUX control ***/
+
+static inline void
+hermes_aux_setaddr(hermes_t *hw, u32 addr)
 {
+	hermes_write_reg(hw, HERMES_AUXPAGE, (u16) (addr >> 7));
+	hermes_write_reg(hw, HERMES_AUXOFFSET, (u16) (addr & 0x7F));
+}
+
+static inline int
+hermes_aux_control(hermes_t *hw, int enabled)
+{
+	int desired_state = enabled ? HERMES_AUX_ENABLED : HERMES_AUX_DISABLED;
+	int action = enabled ? HERMES_AUX_ENABLE : HERMES_AUX_DISABLE;
+	int i;
+
+	/* Already open? */
+	if (hermes_read_reg(hw, HERMES_CONTROL) == desired_state)
+		return 0;
+
+	hermes_write_reg(hw, HERMES_PARAM0, HERMES_AUX_PW0);
+	hermes_write_reg(hw, HERMES_PARAM1, HERMES_AUX_PW1);
+	hermes_write_reg(hw, HERMES_PARAM2, HERMES_AUX_PW2);
+	hermes_write_reg(hw, HERMES_CONTROL, action);
+
+	for (i = 0; i < 20; i++) {
+		udelay(10);
+		if (hermes_read_reg(hw, HERMES_CONTROL) ==
+		    desired_state)
+			return 0;
+	}
+
+	return -EBUSY;
+}
+
+/*** Hermes programming ***/
+
+/* About to start programming data (Hermes I)
+ * offset is the entry point
+ *
+ * Spectrum_cs' Symbol fw does not require this
+ * wl_lkm Agere fw does
+ * Don't know about intersil
+ */
+static int hermesi_program_init(hermes_t *hw, u32 offset)
+{
+	int err;
+
+	/* Disable interrupts?*/
+	/*hw->inten = 0x0;*/
+	/*hermes_write_regn(hw, INTEN, 0);*/
+	/*hermes_set_irqmask(hw, 0);*/
+
+	/* Acknowledge any outstanding command */
+	hermes_write_regn(hw, EVACK, 0xFFFF);
+
+	/* Using init_cmd_wait rather than cmd_wait */
+	err = hw->ops->init_cmd_wait(hw,
+				     0x0100 | HERMES_CMD_INIT,
+				     0, 0, 0, NULL);
+	if (err)
+		return err;
+
+	err = hw->ops->init_cmd_wait(hw,
+				     0x0000 | HERMES_CMD_INIT,
+				     0, 0, 0, NULL);
+	if (err)
+		return err;
+
+	err = hermes_aux_control(hw, 1);
+	pr_debug("AUX enable returned %d\n", err);
+
+	if (err)
+		return err;
+
+	pr_debug("Enabling volatile, EP 0x%08x\n", offset);
+	err = hw->ops->init_cmd_wait(hw,
+				     HERMES_PROGRAM_ENABLE_VOLATILE,
+				     offset & 0xFFFFu,
+				     offset >> 16,
+				     0,
+				     NULL);
+	pr_debug("PROGRAM_ENABLE returned %d\n", err);
+
+	return err;
+}
+
+/* Done programming data (Hermes I)
+ *
+ * Spectrum_cs' Symbol fw does not require this
+ * wl_lkm Agere fw does
+ * Don't know about intersil
+ */
+static int hermesi_program_end(hermes_t *hw)
+{
+	struct hermes_response resp;
+	int rc = 0;
+	int err;
+
+	rc = hw->ops->cmd_wait(hw, HERMES_PROGRAM_DISABLE, 0, &resp);
+
+	pr_debug("PROGRAM_DISABLE returned %d, "
+		 "r0 0x%04x, r1 0x%04x, r2 0x%04x\n",
+		 rc, resp.resp0, resp.resp1, resp.resp2);
+
+	if ((rc == 0) &&
+	    ((resp.status & HERMES_STATUS_CMDCODE) != HERMES_CMD_DOWNLD))
+		rc = -EIO;
+
+	err = hermes_aux_control(hw, 0);
+	pr_debug("AUX disable returned %d\n", err);
+
+	/* Acknowledge any outstanding command */
+	hermes_write_regn(hw, EVACK, 0xFFFF);
+
+	/* Reinitialise, ignoring return */
+	(void) hw->ops->init_cmd_wait(hw, 0x0000 | HERMES_CMD_INIT,
+				      0, 0, 0, NULL);
+
+	return rc ? rc : err;
+}
+
+static int hermes_program_bytes(struct hermes *hw, const char *data,
+				u32 addr, u32 len)
+{
+	/* wl lkm splits the programming into chunks of 2000 bytes.
+	 * This restriction appears to come from USB. The PCMCIA
+	 * adapters can program the whole lot in one go */
+	hermes_aux_setaddr(hw, addr);
+	hermes_write_bytes(hw, HERMES_AUXDATA, data, len);
 	return 0;
 }
 
-static void __exit exit_hermes(void)
+/* Read PDA from the adapter */
+static int hermes_read_pda(hermes_t *hw, __le16 *pda, u32 pda_addr, u16 pda_len)
 {
+	int ret;
+	u16 pda_size;
+	u16 data_len = pda_len;
+	__le16 *data = pda;
+
+	if (hw->eeprom_pda) {
+		/* PDA of spectrum symbol is in eeprom */
+
+		/* Issue command to read EEPROM */
+		ret = hw->ops->cmd_wait(hw, HERMES_CMD_READMIF, 0, NULL);
+		if (ret)
+			return ret;
+	} else {
+		/* wl_lkm does not include PDA size in the PDA area.
+		 * We will pad the information into pda, so other routines
+		 * don't have to be modified */
+		pda[0] = cpu_to_le16(pda_len - 2);
+			/* Includes CFG_PROD_DATA but not itself */
+		pda[1] = cpu_to_le16(0x0800); /* CFG_PROD_DATA */
+		data_len = pda_len - 4;
+		data = pda + 2;
+	}
+
+	/* Open auxiliary port */
+	ret = hermes_aux_control(hw, 1);
+	pr_debug("AUX enable returned %d\n", ret);
+	if (ret)
+		return ret;
+
+	/* Read PDA */
+	hermes_aux_setaddr(hw, pda_addr);
+	hermes_read_words(hw, HERMES_AUXDATA, data, data_len / 2);
+
+	/* Close aux port */
+	ret = hermes_aux_control(hw, 0);
+	pr_debug("AUX disable returned %d\n", ret);
+
+	/* Check PDA length */
+	pda_size = le16_to_cpu(pda[0]);
+	pr_debug("Actual PDA length %d, Max allowed %d\n",
+		 pda_size, pda_len);
+	if (pda_size > pda_len)
+		return -EINVAL;
+
+	return 0;
 }
 
-module_init(init_hermes);
-module_exit(exit_hermes);
+static void hermes_lock_irqsave(spinlock_t *lock,
+				unsigned long *flags) __acquires(lock)
+{
+	spin_lock_irqsave(lock, *flags);
+}
+
+static void hermes_unlock_irqrestore(spinlock_t *lock,
+				     unsigned long *flags) __releases(lock)
+{
+	spin_unlock_irqrestore(lock, *flags);
+}
+
+static void hermes_lock_irq(spinlock_t *lock) __acquires(lock)
+{
+	spin_lock_irq(lock);
+}
+
+static void hermes_unlock_irq(spinlock_t *lock) __releases(lock)
+{
+	spin_unlock_irq(lock);
+}
+
+/* Hermes operations for local buses */
+static const struct hermes_ops hermes_ops_local = {
+	.init = hermes_init,
+	.cmd_wait = hermes_docmd_wait,
+	.init_cmd_wait = hermes_doicmd_wait,
+	.allocate = hermes_allocate,
+	.read_ltv = hermes_read_ltv,
+	.write_ltv = hermes_write_ltv,
+	.bap_pread = hermes_bap_pread,
+	.bap_pwrite = hermes_bap_pwrite,
+	.read_pda = hermes_read_pda,
+	.program_init = hermesi_program_init,
+	.program_end = hermesi_program_end,
+	.program = hermes_program_bytes,
+	.lock_irqsave = hermes_lock_irqsave,
+	.unlock_irqrestore = hermes_unlock_irqrestore,
+	.lock_irq = hermes_lock_irq,
+	.unlock_irq = hermes_unlock_irq,
+};

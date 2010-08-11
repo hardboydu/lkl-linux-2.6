@@ -19,6 +19,8 @@
 #include <linux/kernel.h>
 #include <linux/version.h>
 #include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/if.h>
@@ -69,7 +71,7 @@ MODULE_LICENSE("GPL");
 #endif
 
 /*
- * Modules parameters and associated varaibles
+ * Modules parameters and associated variables
  */
 static int fst_txq_low = FST_LOW_WATER_MARK;
 static int fst_txq_high = FST_HIGH_WATER_MARK;
@@ -527,7 +529,7 @@ static int fst_debug_mask = { FST_DEBUG };
 /*
  *      PCI ID lookup table
  */
-static struct pci_device_id fst_pci_dev_id[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(fst_pci_dev_id) = {
 	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T2P, PCI_ANY_ID, 
 	 PCI_ANY_ID, 0, 0, FST_TYPE_T2P},
 
@@ -792,25 +794,6 @@ fst_process_rx_status(int rx_status, char *name)
 			 */
 			break;
 		}
-
-	case NET_RX_CN_LOW:
-		{
-			dbg(DBG_ASS, "%s: Receive Low Congestion\n", name);
-			break;
-		}
-
-	case NET_RX_CN_MOD:
-		{
-			dbg(DBG_ASS, "%s: Receive Moderate Congestion\n", name);
-			break;
-		}
-
-	case NET_RX_CN_HIGH:
-		{
-			dbg(DBG_ASS, "%s: Receive High Congestion\n", name);
-			break;
-		}
-
 	case NET_RX_DROP:
 		{
 			dbg(DBG_ASS, "%s: Received packet dropped\n", name);
@@ -1364,8 +1347,8 @@ do_bottom_half_tx(struct fst_card_info *card)
 
 		dev = port_to_dev(port);
 		while (!(FST_RDB(card, txDescrRing[pi][port->txpos].bits) &
-			 DMA_OWN)
-		       && !(card->dmatx_in_progress)) {
+			 DMA_OWN) &&
+		       !(card->dmatx_in_progress)) {
 			/*
 			 * There doesn't seem to be a txdone event per-se
 			 * We seem to have to deduce it, by checking the DMA_OWN
@@ -1397,8 +1380,8 @@ do_bottom_half_tx(struct fst_card_info *card)
 				 */
 				FST_WRW(card, txDescrRing[pi][port->txpos].bcnt,
 					cnv_bcnt(skb->len));
-				if ((skb->len < FST_MIN_DMA_LEN)
-				    || (card->family == FST_FAMILY_TXP)) {
+				if ((skb->len < FST_MIN_DMA_LEN) ||
+				    (card->family == FST_FAMILY_TXP)) {
 					/* Enqueue the packet with normal io */
 					memcpy_toio(card->mem +
 						    BUF_OFFSET(txBuffer[pi]
@@ -2048,8 +2031,8 @@ fst_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		/* Sanity check the parameters. We don't support partial writes
 		 * when going over the top
 		 */
-		if (wrthdr.size > FST_MEMSIZE || wrthdr.offset > FST_MEMSIZE
-		    || wrthdr.size + wrthdr.offset > FST_MEMSIZE) {
+		if (wrthdr.size > FST_MEMSIZE || wrthdr.offset > FST_MEMSIZE ||
+		    wrthdr.size + wrthdr.offset > FST_MEMSIZE) {
 			return -ENXIO;
 		}
 
@@ -2293,7 +2276,7 @@ fst_tx_timeout(struct net_device *dev)
 	port->start = 0;
 }
 
-static int
+static netdev_tx_t
 fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct fst_card_info *card;
@@ -2313,7 +2296,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		dbg(DBG_ASS,
 		    "Tried to transmit but no carrier on card %d port %d\n",
 		    card->card_no, port->index);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/* Drop it if it's too big! MTU failure ? */
@@ -2322,7 +2305,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		    LEN_TX_BUFFER);
 		dev_kfree_skb(skb);
 		dev->stats.tx_errors++;
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/*
@@ -2356,7 +2339,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		dev->stats.tx_errors++;
 		dbg(DBG_ASS, "Tx queue overflow card %d port %d\n",
 		    card->card_no, port->index);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/*
@@ -2373,7 +2356,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	fst_q_work_item(&fst_work_txq, card->card_no);
 	tasklet_schedule(&fst_tx_task);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -2423,6 +2406,15 @@ fst_init_card(struct fst_card_info *card)
 	       port_to_dev(&card->ports[card->nports - 1])->name,
 	       type_strings[card->type], card->irq, card->nports);
 }
+
+static const struct net_device_ops fst_ops = {
+	.ndo_open       = fst_open,
+	.ndo_stop       = fst_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = fst_ioctl,
+	.ndo_tx_timeout = fst_tx_timeout,
+};
 
 /*
  *      Initialise card when detected.
@@ -2565,12 +2557,9 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
                 dev->base_addr   = card->pci_conf;
                 dev->irq         = card->irq;
 
-                dev->tx_queue_len          = FST_TX_QUEUE_LEN;
-                dev->open                  = fst_open;
-                dev->stop                  = fst_close;
-                dev->do_ioctl              = fst_ioctl;
-                dev->watchdog_timeo        = FST_TX_TIMEOUT;
-                dev->tx_timeout            = fst_tx_timeout;
+		dev->netdev_ops = &fst_ops;
+		dev->tx_queue_len = FST_TX_QUEUE_LEN;
+		dev->watchdog_timeo = FST_TX_TIMEOUT;
                 hdlc->attach = fst_attach;
                 hdlc->xmit   = fst_start_xmit;
 	}

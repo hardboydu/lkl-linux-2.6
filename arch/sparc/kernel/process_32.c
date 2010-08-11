@@ -17,13 +17,13 @@
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/smp.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 
 #include <asm/auxio.h>
 #include <asm/oplib.h>
@@ -455,7 +455,7 @@ asmlinkage int sparc_do_fork(unsigned long clone_flags,
  */
 extern void ret_from_fork(void);
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+int copy_thread(unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
@@ -526,7 +526,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 			 * Set some valid stack frames to give to the child.
 			 */
 			childstack = (struct sparc_stackf __user *)
-				(sp & ~0x7UL);
+				(sp & ~0xfUL);
 			parentstack = (struct sparc_stackf __user *)
 				regs->u_regs[UREG_FP];
 

@@ -4,7 +4,7 @@
  *  Derived from ivtv-fileops.c
  *
  *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
- *  Copyright (C) 2008  Andy Walls <awalls@radix.net>
+ *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -37,15 +37,21 @@
 
 /* This function tries to claim the stream for a specific file descriptor.
    If no one else is using this stream then the stream is claimed and
-   associated VBI streams are also automatically claimed.
+   associated VBI and IDX streams are also automatically claimed.
    Possible error returns: -EBUSY if someone else has claimed
    the stream or 0 on success. */
-static int cx18_claim_stream(struct cx18_open_id *id, int type)
+int cx18_claim_stream(struct cx18_open_id *id, int type)
 {
 	struct cx18 *cx = id->cx;
 	struct cx18_stream *s = &cx->streams[type];
-	struct cx18_stream *s_vbi;
-	int vbi_type;
+	struct cx18_stream *s_assoc;
+
+	/* Nothing should ever try to directly claim the IDX stream */
+	if (type == CX18_ENC_STREAM_TYPE_IDX) {
+		CX18_WARN("MPEG Index stream cannot be claimed "
+			  "directly, but something tried.\n");
+		return -EINVAL;
+	}
 
 	if (test_and_set_bit(CX18_F_S_CLAIMED, &s->s_flags)) {
 		/* someone already claimed this stream */
@@ -67,32 +73,47 @@ static int cx18_claim_stream(struct cx18_open_id *id, int type)
 	}
 	s->id = id->open_id;
 
-	/* CX18_ENC_STREAM_TYPE_MPG needs to claim CX18_ENC_STREAM_TYPE_VBI
-	   (provided VBI insertion is on and sliced VBI is selected), for all
-	   other streams we're done */
-	if (type == CX18_ENC_STREAM_TYPE_MPG &&
-	    cx->vbi.insert_mpeg && !cx18_raw_vbi(cx)) {
-		vbi_type = CX18_ENC_STREAM_TYPE_VBI;
-	} else {
+	/*
+	 * CX18_ENC_STREAM_TYPE_MPG needs to claim:
+	 * CX18_ENC_STREAM_TYPE_VBI, if VBI insertion is on for sliced VBI, or
+	 * CX18_ENC_STREAM_TYPE_IDX, if VBI insertion is off for sliced VBI
+	 * (We don't yet fix up MPEG Index entries for our inserted packets).
+	 *
+	 * For all other streams we're done.
+	 */
+	if (type != CX18_ENC_STREAM_TYPE_MPG)
 		return 0;
-	}
-	s_vbi = &cx->streams[vbi_type];
 
-	set_bit(CX18_F_S_CLAIMED, &s_vbi->s_flags);
+	s_assoc = &cx->streams[CX18_ENC_STREAM_TYPE_IDX];
+	if (cx->vbi.insert_mpeg && !cx18_raw_vbi(cx))
+		s_assoc = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
+	else if (!cx18_stream_enabled(s_assoc))
+		return 0;
+
+	set_bit(CX18_F_S_CLAIMED, &s_assoc->s_flags);
 
 	/* mark that it is used internally */
-	set_bit(CX18_F_S_INTERNAL_USE, &s_vbi->s_flags);
+	set_bit(CX18_F_S_INTERNAL_USE, &s_assoc->s_flags);
 	return 0;
 }
+EXPORT_SYMBOL(cx18_claim_stream);
 
 /* This function releases a previously claimed stream. It will take into
    account associated VBI streams. */
-static void cx18_release_stream(struct cx18_stream *s)
+void cx18_release_stream(struct cx18_stream *s)
 {
 	struct cx18 *cx = s->cx;
-	struct cx18_stream *s_vbi;
+	struct cx18_stream *s_assoc;
 
 	s->id = -1;
+	if (s->type == CX18_ENC_STREAM_TYPE_IDX) {
+		/*
+		 * The IDX stream is only used internally, and can
+		 * only be indirectly unclaimed by unclaiming the MPG stream.
+		 */
+		return;
+	}
+
 	if (s->type == CX18_ENC_STREAM_TYPE_VBI &&
 		test_bit(CX18_F_S_INTERNAL_USE, &s->s_flags)) {
 		/* this stream is still in use internally */
@@ -105,38 +126,49 @@ static void cx18_release_stream(struct cx18_stream *s)
 
 	cx18_flush_queues(s);
 
-	/* CX18_ENC_STREAM_TYPE_MPG needs to release CX18_ENC_STREAM_TYPE_VBI,
-	   for all other streams we're done */
-	if (s->type == CX18_ENC_STREAM_TYPE_MPG)
-		s_vbi = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
-	else
+	/*
+	 * CX18_ENC_STREAM_TYPE_MPG needs to release the
+	 * CX18_ENC_STREAM_TYPE_VBI and/or CX18_ENC_STREAM_TYPE_IDX streams.
+	 *
+	 * For all other streams we're done.
+	 */
+	if (s->type != CX18_ENC_STREAM_TYPE_MPG)
 		return;
 
-	/* clear internal use flag */
-	if (!test_and_clear_bit(CX18_F_S_INTERNAL_USE, &s_vbi->s_flags)) {
-		/* was already cleared */
-		return;
+	/* Unclaim the associated MPEG Index stream */
+	s_assoc = &cx->streams[CX18_ENC_STREAM_TYPE_IDX];
+	if (test_and_clear_bit(CX18_F_S_INTERNAL_USE, &s_assoc->s_flags)) {
+		clear_bit(CX18_F_S_CLAIMED, &s_assoc->s_flags);
+		cx18_flush_queues(s_assoc);
 	}
-	if (s_vbi->id != -1) {
-		/* VBI stream still claimed by a file descriptor */
-		return;
+
+	/* Unclaim the associated VBI stream */
+	s_assoc = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
+	if (test_and_clear_bit(CX18_F_S_INTERNAL_USE, &s_assoc->s_flags)) {
+		if (s_assoc->id == -1) {
+			/*
+			 * The VBI stream is not still claimed by a file
+			 * descriptor, so completely unclaim it.
+			 */
+			clear_bit(CX18_F_S_CLAIMED, &s_assoc->s_flags);
+			cx18_flush_queues(s_assoc);
+		}
 	}
-	clear_bit(CX18_F_S_CLAIMED, &s_vbi->s_flags);
-	cx18_flush_queues(s_vbi);
 }
+EXPORT_SYMBOL(cx18_release_stream);
 
 static void cx18_dualwatch(struct cx18 *cx)
 {
 	struct v4l2_tuner vt;
-	u16 new_bitmap;
-	u16 new_stereo_mode;
-	const u16 stereo_mask = 0x0300;
-	const u16 dual = 0x0200;
+	u32 new_bitmap;
+	u32 new_stereo_mode;
+	const u32 stereo_mask = 0x0300;
+	const u32 dual = 0x0200;
 	u32 h;
 
 	new_stereo_mode = cx->params.audio_properties & stereo_mask;
 	memset(&vt, 0, sizeof(vt));
-	cx18_call_i2c_clients(cx, VIDIOC_G_TUNER, &vt);
+	cx18_call_all(cx, tuner, g_tuner, &vt);
 	if (vt.audmode == V4L2_TUNER_MODE_LANG1_LANG2 &&
 			(vt.rxsubchans & V4L2_TUNER_SUB_LANG2))
 		new_stereo_mode = dual;
@@ -166,51 +198,51 @@ static void cx18_dualwatch(struct cx18 *cx)
 }
 
 
-static struct cx18_buffer *cx18_get_buffer(struct cx18_stream *s, int non_block, int *err)
+static struct cx18_mdl *cx18_get_mdl(struct cx18_stream *s, int non_block,
+				     int *err)
 {
 	struct cx18 *cx = s->cx;
 	struct cx18_stream *s_vbi = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
-	struct cx18_buffer *buf;
+	struct cx18_mdl *mdl;
 	DEFINE_WAIT(wait);
 
 	*err = 0;
 	while (1) {
 		if (s->type == CX18_ENC_STREAM_TYPE_MPG) {
-
+			/* Process pending program updates and VBI data */
 			if (time_after(jiffies, cx->dualwatch_jiffies + msecs_to_jiffies(1000))) {
 				cx->dualwatch_jiffies = jiffies;
 				cx18_dualwatch(cx);
 			}
 			if (test_bit(CX18_F_S_INTERNAL_USE, &s_vbi->s_flags) &&
 			    !test_bit(CX18_F_S_APPL_IO, &s_vbi->s_flags)) {
-				while ((buf = cx18_dequeue(s_vbi, &s_vbi->q_full))) {
+				while ((mdl = cx18_dequeue(s_vbi,
+							   &s_vbi->q_full))) {
 					/* byteswap and process VBI data */
-					cx18_process_vbi_data(cx, buf,
-							      s_vbi->dma_pts,
+					cx18_process_vbi_data(cx, mdl,
 							      s_vbi->type);
-					cx18_stream_put_buf_fw(s_vbi, buf);
+					cx18_stream_put_mdl_fw(s_vbi, mdl);
 				}
 			}
-			buf = &cx->vbi.sliced_mpeg_buf;
-			if (buf->readpos != buf->bytesused)
-				return buf;
+			mdl = &cx->vbi.sliced_mpeg_mdl;
+			if (mdl->readpos != mdl->bytesused)
+				return mdl;
 		}
 
 		/* do we have new data? */
-		buf = cx18_dequeue(s, &s->q_full);
-		if (buf) {
-			if (!test_and_clear_bit(CX18_F_B_NEED_BUF_SWAP,
-						&buf->b_flags))
-				return buf;
+		mdl = cx18_dequeue(s, &s->q_full);
+		if (mdl) {
+			if (!test_and_clear_bit(CX18_F_M_NEED_SWAP,
+						&mdl->m_flags))
+				return mdl;
 			if (s->type == CX18_ENC_STREAM_TYPE_MPG)
 				/* byteswap MPG data */
-				cx18_buf_swap(buf);
+				cx18_mdl_swap(mdl);
 			else {
 				/* byteswap and process VBI data */
-				cx18_process_vbi_data(cx, buf,
-						s->dma_pts, s->type);
+				cx18_process_vbi_data(cx, mdl, s->type);
 			}
-			return buf;
+			return mdl;
 		}
 
 		/* return if end of stream */
@@ -229,7 +261,7 @@ static struct cx18_buffer *cx18_get_buffer(struct cx18_stream *s, int non_block,
 		prepare_to_wait(&s->waitq, &wait, TASK_INTERRUPTIBLE);
 		/* New buffers might have become available before we were added
 		   to the waitqueue */
-		if (!atomic_read(&s->q_full.buffers))
+		if (!atomic_read(&s->q_full.depth))
 			schedule();
 		finish_wait(&s->waitq, &wait);
 		if (signal_pending(current)) {
@@ -241,25 +273,51 @@ static struct cx18_buffer *cx18_get_buffer(struct cx18_stream *s, int non_block,
 	}
 }
 
-static void cx18_setup_sliced_vbi_buf(struct cx18 *cx)
+static void cx18_setup_sliced_vbi_mdl(struct cx18 *cx)
 {
+	struct cx18_mdl *mdl = &cx->vbi.sliced_mpeg_mdl;
+	struct cx18_buffer *buf = &cx->vbi.sliced_mpeg_buf;
 	int idx = cx->vbi.inserted_frame % CX18_VBI_FRAMES;
 
-	cx->vbi.sliced_mpeg_buf.buf = cx->vbi.sliced_mpeg_data[idx];
-	cx->vbi.sliced_mpeg_buf.bytesused = cx->vbi.sliced_mpeg_size[idx];
-	cx->vbi.sliced_mpeg_buf.readpos = 0;
+	buf->buf = cx->vbi.sliced_mpeg_data[idx];
+	buf->bytesused = cx->vbi.sliced_mpeg_size[idx];
+	buf->readpos = 0;
+
+	mdl->curr_buf = NULL;
+	mdl->bytesused = cx->vbi.sliced_mpeg_size[idx];
+	mdl->readpos = 0;
 }
 
 static size_t cx18_copy_buf_to_user(struct cx18_stream *s,
-		struct cx18_buffer *buf, char __user *ubuf, size_t ucount)
+	struct cx18_buffer *buf, char __user *ubuf, size_t ucount, bool *stop)
 {
 	struct cx18 *cx = s->cx;
 	size_t len = buf->bytesused - buf->readpos;
 
+	*stop = false;
 	if (len > ucount)
 		len = ucount;
 	if (cx->vbi.insert_mpeg && s->type == CX18_ENC_STREAM_TYPE_MPG &&
 	    !cx18_raw_vbi(cx) && buf != &cx->vbi.sliced_mpeg_buf) {
+		/*
+		 * Try to find a good splice point in the PS, just before
+		 * an MPEG-2 Program Pack start code, and provide only
+		 * up to that point to the user, so it's easy to insert VBI data
+		 * the next time around.
+		 *
+		 * This will not work for an MPEG-2 TS and has only been
+		 * verified by analysis to work for an MPEG-2 PS.  Helen Buus
+		 * pointed out this works for the CX23416 MPEG-2 DVD compatible
+		 * stream, and research indicates both the MPEG 2 SVCD and DVD
+		 * stream types use an MPEG-2 PS container.
+		 */
+		/*
+		 * An MPEG-2 Program Stream (PS) is a series of
+		 * MPEG-2 Program Packs terminated by an
+		 * MPEG Program End Code after the last Program Pack.
+		 * A Program Pack may hold a PS System Header packet and any
+		 * number of Program Elementary Stream (PES) Packets
+		 */
 		const char *start = buf->buf + buf->readpos;
 		const char *p = start + 1;
 		const u8 *q;
@@ -267,40 +325,57 @@ static size_t cx18_copy_buf_to_user(struct cx18_stream *s,
 		int stuffing, i;
 
 		while (start + len > p) {
+			/* Scan for a 0 to find a potential MPEG-2 start code */
 			q = memchr(p, 0, start + len - p);
 			if (q == NULL)
 				break;
 			p = q + 1;
+			/*
+			 * Keep looking if not a
+			 * MPEG-2 Pack header start code:  0x00 0x00 0x01 0xba
+			 * or MPEG-2 video PES start code: 0x00 0x00 0x01 0xe0
+			 */
 			if ((char *)q + 15 >= buf->buf + buf->bytesused ||
 			    q[1] != 0 || q[2] != 1 || q[3] != ch)
 				continue;
+
+			/* If expecting the primary video PES */
 			if (!cx->search_pack_header) {
+				/* Continue if it couldn't be a PES packet */
 				if ((q[6] & 0xc0) != 0x80)
 					continue;
-				if (((q[7] & 0xc0) == 0x80 &&
-				     (q[9] & 0xf0) == 0x20) ||
-				    ((q[7] & 0xc0) == 0xc0 &&
-				     (q[9] & 0xf0) == 0x30)) {
-					ch = 0xba;
+				/* Check if a PTS or PTS & DTS follow */
+				if (((q[7] & 0xc0) == 0x80 &&  /* PTS only */
+				     (q[9] & 0xf0) == 0x20) || /* PTS only */
+				    ((q[7] & 0xc0) == 0xc0 &&  /* PTS & DTS */
+				     (q[9] & 0xf0) == 0x30)) { /* DTS follows */
+					/* Assume we found the video PES hdr */
+					ch = 0xba; /* next want a Program Pack*/
 					cx->search_pack_header = 1;
-					p = q + 9;
+					p = q + 9; /* Skip this video PES hdr */
 				}
 				continue;
 			}
+
+			/* We may have found a Program Pack start code */
+
+			/* Get the count of stuffing bytes & verify them */
 			stuffing = q[13] & 7;
 			/* all stuffing bytes must be 0xff */
 			for (i = 0; i < stuffing; i++)
 				if (q[14 + i] != 0xff)
 					break;
-			if (i == stuffing &&
-			    (q[4] & 0xc4) == 0x44 &&
-			    (q[12] & 3) == 3 &&
-			    q[14 + stuffing] == 0 &&
+			if (i == stuffing && /* right number of stuffing bytes*/
+			    (q[4] & 0xc4) == 0x44 && /* marker check */
+			    (q[12] & 3) == 3 &&  /* marker check */
+			    q[14 + stuffing] == 0 && /* PES Pack or Sys Hdr */
 			    q[15 + stuffing] == 0 &&
 			    q[16 + stuffing] == 1) {
-				cx->search_pack_header = 0;
+				/* We declare we actually found a Program Pack*/
+				cx->search_pack_header = 0; /* expect vid PES */
 				len = (char *)q - start;
-				cx18_setup_sliced_vbi_buf(cx);
+				cx18_setup_sliced_vbi_mdl(cx);
+				*stop = true;
 				break;
 			}
 		}
@@ -315,6 +390,48 @@ static size_t cx18_copy_buf_to_user(struct cx18_stream *s,
 	    buf != &cx->vbi.sliced_mpeg_buf)
 		cx->mpg_data_received += len;
 	return len;
+}
+
+static size_t cx18_copy_mdl_to_user(struct cx18_stream *s,
+		struct cx18_mdl *mdl, char __user *ubuf, size_t ucount)
+{
+	size_t tot_written = 0;
+	int rc;
+	bool stop = false;
+
+	if (mdl->curr_buf == NULL)
+		mdl->curr_buf = list_first_entry(&mdl->buf_list,
+						 struct cx18_buffer, list);
+
+	if (list_entry_is_past_end(mdl->curr_buf, &mdl->buf_list, list)) {
+		/*
+		 * For some reason we've exhausted the buffers, but the MDL
+		 * object still said some data was unread.
+		 * Fix that and bail out.
+		 */
+		mdl->readpos = mdl->bytesused;
+		return 0;
+	}
+
+	list_for_each_entry_from(mdl->curr_buf, &mdl->buf_list, list) {
+
+		if (mdl->curr_buf->readpos >= mdl->curr_buf->bytesused)
+			continue;
+
+		rc = cx18_copy_buf_to_user(s, mdl->curr_buf, ubuf + tot_written,
+					   ucount - tot_written, &stop);
+		if (rc < 0)
+			return rc;
+		mdl->readpos += rc;
+		tot_written += rc;
+
+		if (stop ||	/* Forced stopping point for VBI insertion */
+		    tot_written >= ucount ||	/* Reader request statisfied */
+		    mdl->curr_buf->readpos < mdl->curr_buf->bytesused ||
+		    mdl->readpos >= mdl->bytesused) /* MDL buffers drained */
+			break;
+	}
+	return tot_written;
 }
 
 static ssize_t cx18_read(struct cx18_stream *s, char __user *ubuf,
@@ -338,12 +455,12 @@ static ssize_t cx18_read(struct cx18_stream *s, char __user *ubuf,
 		single_frame = 1;
 
 	for (;;) {
-		struct cx18_buffer *buf;
+		struct cx18_mdl *mdl;
 		int rc;
 
-		buf = cx18_get_buffer(s, non_block, &rc);
+		mdl = cx18_get_mdl(s, non_block, &rc);
 		/* if there is no data available... */
-		if (buf == NULL) {
+		if (mdl == NULL) {
 			/* if we got data, then return that regardless */
 			if (tot_written)
 				break;
@@ -357,20 +474,20 @@ static ssize_t cx18_read(struct cx18_stream *s, char __user *ubuf,
 			return rc;
 		}
 
-		rc = cx18_copy_buf_to_user(s, buf, ubuf + tot_written,
+		rc = cx18_copy_mdl_to_user(s, mdl, ubuf + tot_written,
 				tot_count - tot_written);
 
-		if (buf != &cx->vbi.sliced_mpeg_buf) {
-			if (buf->readpos == buf->bytesused)
-				cx18_stream_put_buf_fw(s, buf);
+		if (mdl != &cx->vbi.sliced_mpeg_mdl) {
+			if (mdl->readpos == mdl->bytesused)
+				cx18_stream_put_mdl_fw(s, mdl);
 			else
-				cx18_push(s, buf, &s->q_full);
-		} else if (buf->readpos == buf->bytesused) {
+				cx18_push(s, mdl, &s->q_full);
+		} else if (mdl->readpos == mdl->bytesused) {
 			int idx = cx->vbi.inserted_frame % CX18_VBI_FRAMES;
 
 			cx->vbi.sliced_mpeg_size[idx] = 0;
 			cx->vbi.inserted_frame++;
-			cx->vbi_data_inserted += buf->bytesused;
+			cx->vbi_data_inserted += mdl->bytesused;
 		}
 		if (rc < 0)
 			return rc;
@@ -399,6 +516,7 @@ int cx18_start_capture(struct cx18_open_id *id)
 	struct cx18 *cx = id->cx;
 	struct cx18_stream *s = &cx->streams[id->type];
 	struct cx18_stream *s_vbi;
+	struct cx18_stream *s_idx;
 
 	if (s->type == CX18_ENC_STREAM_TYPE_RAD) {
 		/* you cannot read from these stream types. */
@@ -417,25 +535,33 @@ int cx18_start_capture(struct cx18_open_id *id)
 		return 0;
 	}
 
-	/* Start VBI capture if required */
+	/* Start associated VBI or IDX stream capture if required */
 	s_vbi = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
-	if (s->type == CX18_ENC_STREAM_TYPE_MPG &&
-	    test_bit(CX18_F_S_INTERNAL_USE, &s_vbi->s_flags) &&
-	    !test_and_set_bit(CX18_F_S_STREAMING, &s_vbi->s_flags)) {
-		/* Note: the CX18_ENC_STREAM_TYPE_VBI is claimed
-		   automatically when the MPG stream is claimed.
-		   We only need to start the VBI capturing. */
-		if (cx18_start_v4l2_encode_stream(s_vbi)) {
-			CX18_DEBUG_WARN("VBI capture start failed\n");
-
-			/* Failure, clean up and return an error */
-			clear_bit(CX18_F_S_STREAMING, &s_vbi->s_flags);
-			clear_bit(CX18_F_S_STREAMING, &s->s_flags);
-			/* also releases the associated VBI stream */
-			cx18_release_stream(s);
-			return -EIO;
+	s_idx = &cx->streams[CX18_ENC_STREAM_TYPE_IDX];
+	if (s->type == CX18_ENC_STREAM_TYPE_MPG) {
+		/*
+		 * The VBI and IDX streams should have been claimed
+		 * automatically, if for internal use, when the MPG stream was
+		 * claimed.  We only need to start these streams capturing.
+		 */
+		if (test_bit(CX18_F_S_INTERNAL_USE, &s_idx->s_flags) &&
+		    !test_and_set_bit(CX18_F_S_STREAMING, &s_idx->s_flags)) {
+			if (cx18_start_v4l2_encode_stream(s_idx)) {
+				CX18_DEBUG_WARN("IDX capture start failed\n");
+				clear_bit(CX18_F_S_STREAMING, &s_idx->s_flags);
+				goto start_failed;
+			}
+			CX18_DEBUG_INFO("IDX capture started\n");
 		}
-		CX18_DEBUG_INFO("VBI insertion started\n");
+		if (test_bit(CX18_F_S_INTERNAL_USE, &s_vbi->s_flags) &&
+		    !test_and_set_bit(CX18_F_S_STREAMING, &s_vbi->s_flags)) {
+			if (cx18_start_v4l2_encode_stream(s_vbi)) {
+				CX18_DEBUG_WARN("VBI capture start failed\n");
+				clear_bit(CX18_F_S_STREAMING, &s_vbi->s_flags);
+				goto start_failed;
+			}
+			CX18_DEBUG_INFO("VBI insertion started\n");
+		}
 	}
 
 	/* Tell the card to start capturing */
@@ -448,19 +574,29 @@ int cx18_start_capture(struct cx18_open_id *id)
 		return 0;
 	}
 
-	/* failure, clean up */
+start_failed:
 	CX18_DEBUG_WARN("Failed to start capturing for stream %s\n", s->name);
 
-	/* Note: the CX18_ENC_STREAM_TYPE_VBI is released
-	   automatically when the MPG stream is released.
-	   We only need to stop the VBI capturing. */
-	if (s->type == CX18_ENC_STREAM_TYPE_MPG &&
-	    test_bit(CX18_F_S_STREAMING, &s_vbi->s_flags)) {
-		cx18_stop_v4l2_encode_stream(s_vbi, 0);
-		clear_bit(CX18_F_S_STREAMING, &s_vbi->s_flags);
+	/*
+	 * The associated VBI and IDX streams for internal use are released
+	 * automatically when the MPG stream is released.  We only need to stop
+	 * the associated stream.
+	 */
+	if (s->type == CX18_ENC_STREAM_TYPE_MPG) {
+		/* Stop the IDX stream which is always for internal use */
+		if (test_bit(CX18_F_S_STREAMING, &s_idx->s_flags)) {
+			cx18_stop_v4l2_encode_stream(s_idx, 0);
+			clear_bit(CX18_F_S_STREAMING, &s_idx->s_flags);
+		}
+		/* Stop the VBI stream, if only running for internal use */
+		if (test_bit(CX18_F_S_STREAMING, &s_vbi->s_flags) &&
+		    !test_bit(CX18_F_S_APPL_IO, &s_vbi->s_flags)) {
+			cx18_stop_v4l2_encode_stream(s_vbi, 0);
+			clear_bit(CX18_F_S_STREAMING, &s_vbi->s_flags);
+		}
 	}
 	clear_bit(CX18_F_S_STREAMING, &s->s_flags);
-	cx18_release_stream(s);
+	cx18_release_stream(s); /* Also releases associated streams */
 	return -EIO;
 }
 
@@ -508,7 +644,7 @@ unsigned int cx18_v4l2_enc_poll(struct file *filp, poll_table *wait)
 	CX18_DEBUG_HI_FILE("Encoder poll\n");
 	poll_wait(filp, &s->waitq, wait);
 
-	if (atomic_read(&s->q_full.buffers))
+	if (atomic_read(&s->q_full.depth))
 		return POLLIN | POLLRDNORM;
 	if (eof)
 		return POLLHUP;
@@ -519,6 +655,8 @@ void cx18_stop_capture(struct cx18_open_id *id, int gop_end)
 {
 	struct cx18 *cx = id->cx;
 	struct cx18_stream *s = &cx->streams[id->type];
+	struct cx18_stream *s_vbi = &cx->streams[CX18_ENC_STREAM_TYPE_VBI];
+	struct cx18_stream *s_idx = &cx->streams[CX18_ENC_STREAM_TYPE_IDX];
 
 	CX18_DEBUG_IOCTL("close() of %s\n", s->name);
 
@@ -526,17 +664,19 @@ void cx18_stop_capture(struct cx18_open_id *id, int gop_end)
 
 	/* Stop capturing */
 	if (test_bit(CX18_F_S_STREAMING, &s->s_flags)) {
-		struct cx18_stream *s_vbi =
-			&cx->streams[CX18_ENC_STREAM_TYPE_VBI];
-
 		CX18_DEBUG_INFO("close stopping capture\n");
-		/* Special case: a running VBI capture for VBI insertion
-		   in the mpeg stream. Need to stop that too. */
-		if (id->type == CX18_ENC_STREAM_TYPE_MPG &&
-		    test_bit(CX18_F_S_STREAMING, &s_vbi->s_flags) &&
-		    !test_bit(CX18_F_S_APPL_IO, &s_vbi->s_flags)) {
-			CX18_DEBUG_INFO("close stopping embedded VBI capture\n");
-			cx18_stop_v4l2_encode_stream(s_vbi, 0);
+		if (id->type == CX18_ENC_STREAM_TYPE_MPG) {
+			/* Stop internal use associated VBI and IDX streams */
+			if (test_bit(CX18_F_S_STREAMING, &s_vbi->s_flags) &&
+			    !test_bit(CX18_F_S_APPL_IO, &s_vbi->s_flags)) {
+				CX18_DEBUG_INFO("close stopping embedded VBI "
+						"capture\n");
+				cx18_stop_v4l2_encode_stream(s_vbi, 0);
+			}
+			if (test_bit(CX18_F_S_STREAMING, &s_idx->s_flags)) {
+				CX18_DEBUG_INFO("close stopping IDX capture\n");
+				cx18_stop_v4l2_encode_stream(s_idx, 0);
+			}
 		}
 		if (id->type == CX18_ENC_STREAM_TYPE_VBI &&
 		    test_bit(CX18_F_S_INTERNAL_USE, &s->s_flags))
@@ -560,7 +700,7 @@ int cx18_v4l2_close(struct file *filp)
 
 	CX18_DEBUG_IOCTL("close() of %s\n", s->name);
 
-	v4l2_prio_close(&cx->prio, &id->prio);
+	v4l2_prio_close(&cx->prio, id->prio);
 
 	/* Easy case first: this stream was never claimed by us */
 	if (s->id != id->open_id) {
@@ -578,7 +718,7 @@ int cx18_v4l2_close(struct file *filp)
 		/* Mark that the radio is no longer in use */
 		clear_bit(CX18_F_I_RADIO_USER, &cx->i_flags);
 		/* Switch tuner to TV */
-		cx18_call_i2c_clients(cx, VIDIOC_S_STD, &cx->std);
+		cx18_call_all(cx, core, s_std, cx->std);
 		/* Select correct audio input (i.e. TV tuner or Line in) */
 		cx18_audio_set_io(cx);
 		if (atomic_read(&cx->ana_capturing) > 0) {
@@ -641,7 +781,7 @@ static int cx18_serialized_open(struct cx18_stream *s, struct file *filp)
 		/* We have the radio */
 		cx18_mute(cx);
 		/* Switch tuner to radio */
-		cx18_call_i2c_clients(cx, AUDC_SET_RADIO, NULL);
+		cx18_call_all(cx, tuner, s_radio);
 		/* Select the correct audio input (i.e. radio tuner) */
 		cx18_audio_set_io(cx);
 		/* Done! Unmute and continue. */
@@ -652,38 +792,15 @@ static int cx18_serialized_open(struct cx18_stream *s, struct file *filp)
 
 int cx18_v4l2_open(struct file *filp)
 {
-	int res, x, y = 0;
-	struct cx18 *cx = NULL;
-	struct cx18_stream *s = NULL;
-	int minor = video_devdata(filp)->minor;
-
-	/* Find which card this open was on */
-	spin_lock(&cx18_cards_lock);
-	for (x = 0; cx == NULL && x < cx18_cards_active; x++) {
-		/* find out which stream this open was on */
-		for (y = 0; y < CX18_MAX_STREAMS; y++) {
-			if (cx18_cards[x] == NULL)
-				continue;
-			s = &cx18_cards[x]->streams[y];
-			if (s->v4l2dev && s->v4l2dev->minor == minor) {
-				cx = cx18_cards[x];
-				break;
-			}
-		}
-	}
-	spin_unlock(&cx18_cards_lock);
-
-	if (cx == NULL) {
-		/* Couldn't find a device registered
-		   on that minor, shouldn't happen! */
-		printk(KERN_WARNING "No cx18 device found on minor %d\n",
-				minor);
-		return -ENXIO;
-	}
+	int res;
+	struct video_device *video_dev = video_devdata(filp);
+	struct cx18_stream *s = video_get_drvdata(video_dev);
+	struct cx18 *cx = s->cx;
 
 	mutex_lock(&cx->serialize_lock);
 	if (cx18_init_on_first_open(cx)) {
-		CX18_ERR("Failed to initialize on minor %d\n", minor);
+		CX18_ERR("Failed to initialize on %s\n",
+			 video_device_node_name(video_dev));
 		mutex_unlock(&cx->serialize_lock);
 		return -ENXIO;
 	}

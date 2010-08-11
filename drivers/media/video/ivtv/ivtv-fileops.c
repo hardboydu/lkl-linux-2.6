@@ -32,6 +32,7 @@
 #include "ivtv-yuv.h"
 #include "ivtv-ioctl.h"
 #include "ivtv-cards.h"
+#include <media/v4l2-event.h>
 #include <media/saa7115.h>
 
 /* This function tries to claim the stream for a specific file descriptor.
@@ -148,10 +149,10 @@ void ivtv_release_stream(struct ivtv_stream *s)
 static void ivtv_dualwatch(struct ivtv *itv)
 {
 	struct v4l2_tuner vt;
-	u16 new_bitmap;
-	u16 new_stereo_mode;
-	const u16 stereo_mask = 0x0300;
-	const u16 dual = 0x0200;
+	u32 new_bitmap;
+	u32 new_stereo_mode;
+	const u32 stereo_mask = 0x0300;
+	const u32 dual = 0x0200;
 
 	new_stereo_mode = itv->params.audio_properties & stereo_mask;
 	memset(&vt, 0, sizeof(vt));
@@ -506,7 +507,7 @@ int ivtv_start_capture(struct ivtv_open_id *id)
 
 ssize_t ivtv_v4l2_read(struct file * filp, char __user *buf, size_t count, loff_t * pos)
 {
-	struct ivtv_open_id *id = filp->private_data;
+	struct ivtv_open_id *id = fh2id(filp->private_data);
 	struct ivtv *itv = id->itv;
 	struct ivtv_stream *s = &itv->streams[id->type];
 	int rc;
@@ -541,7 +542,7 @@ int ivtv_start_decoding(struct ivtv_open_id *id, int speed)
 
 ssize_t ivtv_v4l2_write(struct file *filp, const char __user *user_buf, size_t count, loff_t *pos)
 {
-	struct ivtv_open_id *id = filp->private_data;
+	struct ivtv_open_id *id = fh2id(filp->private_data);
 	struct ivtv *itv = id->itv;
 	struct ivtv_stream *s = &itv->streams[id->type];
 	struct yuv_playback_info *yi = &itv->yuv_info;
@@ -711,19 +712,31 @@ retry:
 
 unsigned int ivtv_v4l2_dec_poll(struct file *filp, poll_table *wait)
 {
-	struct ivtv_open_id *id = filp->private_data;
+	struct ivtv_open_id *id = fh2id(filp->private_data);
 	struct ivtv *itv = id->itv;
 	struct ivtv_stream *s = &itv->streams[id->type];
 	int res = 0;
 
 	/* add stream's waitq to the poll list */
 	IVTV_DEBUG_HI_FILE("Decoder poll\n");
-	poll_wait(filp, &s->waitq, wait);
 
-	set_bit(IVTV_F_I_EV_VSYNC_ENABLED, &itv->i_flags);
-	if (test_bit(IVTV_F_I_EV_VSYNC, &itv->i_flags) ||
-	    test_bit(IVTV_F_I_EV_DEC_STOPPED, &itv->i_flags))
-		res = POLLPRI;
+	/* If there are subscribed events, then only use the new event
+	   API instead of the old video.h based API. */
+	if (!list_empty(&id->fh.events->subscribed)) {
+		poll_wait(filp, &id->fh.events->wait, wait);
+		/* Turn off the old-style vsync events */
+		clear_bit(IVTV_F_I_EV_VSYNC_ENABLED, &itv->i_flags);
+		if (v4l2_event_pending(&id->fh))
+			res = POLLPRI;
+	} else {
+		/* This is the old-style API which is here only for backwards
+		   compatibility. */
+		poll_wait(filp, &s->waitq, wait);
+		set_bit(IVTV_F_I_EV_VSYNC_ENABLED, &itv->i_flags);
+		if (test_bit(IVTV_F_I_EV_VSYNC, &itv->i_flags) ||
+		    test_bit(IVTV_F_I_EV_DEC_STOPPED, &itv->i_flags))
+			res = POLLPRI;
+	}
 
 	/* Allow write if buffers are available for writing */
 	if (s->q_free.buffers)
@@ -733,7 +746,7 @@ unsigned int ivtv_v4l2_dec_poll(struct file *filp, poll_table *wait)
 
 unsigned int ivtv_v4l2_enc_poll(struct file *filp, poll_table * wait)
 {
-	struct ivtv_open_id *id = filp->private_data;
+	struct ivtv_open_id *id = fh2id(filp->private_data);
 	struct ivtv *itv = id->itv;
 	struct ivtv_stream *s = &itv->streams[id->type];
 	int eof = test_bit(IVTV_F_S_STREAMOFF, &s->s_flags);
@@ -810,6 +823,12 @@ static void ivtv_stop_decoding(struct ivtv_open_id *id, int flags, u64 pts)
 
 	IVTV_DEBUG_FILE("close() of %s\n", s->name);
 
+	if (id->type == IVTV_DEC_STREAM_TYPE_YUV &&
+		test_bit(IVTV_F_I_DECODING_YUV, &itv->i_flags)) {
+		/* Restore registers we've changed & clean up any mess */
+		ivtv_yuv_close(itv);
+	}
+
 	/* Stop decoding */
 	if (test_bit(IVTV_F_S_STREAMING, &s->s_flags)) {
 		IVTV_DEBUG_INFO("close stopping decode\n");
@@ -819,10 +838,7 @@ static void ivtv_stop_decoding(struct ivtv_open_id *id, int flags, u64 pts)
 	}
 	clear_bit(IVTV_F_S_APPL_IO, &s->s_flags);
 	clear_bit(IVTV_F_S_STREAMOFF, &s->s_flags);
-	if (id->type == IVTV_DEC_STREAM_TYPE_YUV && test_bit(IVTV_F_I_DECODING_YUV, &itv->i_flags)) {
-		/* Restore registers we've changed & clean up any mess we've made */
-		ivtv_yuv_close(itv);
-	}
+
 	if (itv->output_mode == OUT_UDMA_YUV && id->yuv_frames)
 		itv->output_mode = OUT_NONE;
 
@@ -833,13 +849,16 @@ static void ivtv_stop_decoding(struct ivtv_open_id *id, int flags, u64 pts)
 
 int ivtv_v4l2_close(struct file *filp)
 {
-	struct ivtv_open_id *id = filp->private_data;
+	struct v4l2_fh *fh = filp->private_data;
+	struct ivtv_open_id *id = fh2id(fh);
 	struct ivtv *itv = id->itv;
 	struct ivtv_stream *s = &itv->streams[id->type];
 
 	IVTV_DEBUG_FILE("close %s\n", s->name);
 
-	v4l2_prio_close(&itv->prio, &id->prio);
+	v4l2_prio_close(&itv->prio, id->prio);
+	v4l2_fh_del(fh);
+	v4l2_fh_exit(fh);
 
 	/* Easy case first: this stream was never claimed by us */
 	if (s->id != id->open_id) {
@@ -857,15 +876,12 @@ int ivtv_v4l2_close(struct file *filp)
 		/* Mark that the radio is no longer in use */
 		clear_bit(IVTV_F_I_RADIO_USER, &itv->i_flags);
 		/* Switch tuner to TV */
-		ivtv_call_all(itv, tuner, s_std, itv->std);
+		ivtv_call_all(itv, core, s_std, itv->std);
 		/* Select correct audio input (i.e. TV tuner or Line in) */
 		ivtv_audio_set_io(itv);
-		if (itv->hw_flags & IVTV_HW_SAA711X)
-		{
-			struct v4l2_crystal_freq crystal_freq;
-			crystal_freq.freq = SAA7115_FREQ_32_11_MHZ;
-			crystal_freq.flags = 0;
-			ivtv_call_hw(itv, IVTV_HW_SAA711X, video, s_crystal_freq, &crystal_freq);
+		if (itv->hw_flags & IVTV_HW_SAA711X) {
+			ivtv_call_hw(itv, IVTV_HW_SAA711X, video, s_crystal_freq,
+					SAA7115_FREQ_32_11_MHZ, 0);
 		}
 		if (atomic_read(&itv->capturing) > 0) {
 			/* Undo video mute */
@@ -898,6 +914,7 @@ static int ivtv_serialized_open(struct ivtv_stream *s, struct file *filp)
 {
 	struct ivtv *itv = s->itv;
 	struct ivtv_open_id *item;
+	int res = 0;
 
 	IVTV_DEBUG_FILE("open %s\n", s->name);
 
@@ -918,17 +935,27 @@ static int ivtv_serialized_open(struct ivtv_stream *s, struct file *filp)
 	}
 
 	/* Allocate memory */
-	item = kmalloc(sizeof(struct ivtv_open_id), GFP_KERNEL);
+	item = kzalloc(sizeof(struct ivtv_open_id), GFP_KERNEL);
 	if (NULL == item) {
 		IVTV_DEBUG_WARN("nomem on v4l2 open\n");
 		return -ENOMEM;
+	}
+	v4l2_fh_init(&item->fh, s->vdev);
+	if (s->type == IVTV_DEC_STREAM_TYPE_YUV ||
+	    s->type == IVTV_DEC_STREAM_TYPE_MPG) {
+		res = v4l2_event_alloc(&item->fh, 60);
+	}
+	if (res < 0) {
+		v4l2_fh_exit(&item->fh);
+		kfree(item);
+		return res;
 	}
 	item->itv = itv;
 	item->type = s->type;
 	v4l2_prio_open(&itv->prio, &item->prio);
 
 	item->open_id = itv->open_id++;
-	filp->private_data = item;
+	filp->private_data = &item->fh;
 
 	if (item->type == IVTV_ENC_STREAM_TYPE_RAD) {
 		/* Try to claim this stream */
@@ -943,6 +970,7 @@ static int ivtv_serialized_open(struct ivtv_stream *s, struct file *filp)
 				/* switching to radio while capture is
 				   in progress is not polite */
 				ivtv_release_stream(s);
+				v4l2_fh_exit(&item->fh);
 				kfree(item);
 				return -EBUSY;
 			}
@@ -956,10 +984,8 @@ static int ivtv_serialized_open(struct ivtv_stream *s, struct file *filp)
 		/* Select the correct audio input (i.e. radio tuner) */
 		ivtv_audio_set_io(itv);
 		if (itv->hw_flags & IVTV_HW_SAA711X) {
-			struct v4l2_crystal_freq crystal_freq;
-			crystal_freq.freq = SAA7115_FREQ_32_11_MHZ;
-			crystal_freq.flags = SAA7115_FREQ_FL_APLL;
-			ivtv_call_hw(itv, IVTV_HW_SAA711X, video, s_crystal_freq, &crystal_freq);
+			ivtv_call_hw(itv, IVTV_HW_SAA711X, video, s_crystal_freq,
+				SAA7115_FREQ_32_11_MHZ, SAA7115_FREQ_FL_APLL);
 		}
 		/* Done! Unmute and continue. */
 		ivtv_unmute(itv);
@@ -975,6 +1001,7 @@ static int ivtv_serialized_open(struct ivtv_stream *s, struct file *filp)
 				1080 * ((itv->yuv_info.v4l2_src_h + 31) & ~31);
 		itv->yuv_info.stream_size = 0;
 	}
+	v4l2_fh_add(&item->fh);
 	return 0;
 }
 
@@ -990,8 +1017,8 @@ int ivtv_v4l2_open(struct file *filp)
 
 	mutex_lock(&itv->serialize_lock);
 	if (ivtv_init_on_first_open(itv)) {
-		IVTV_ERR("Failed to initialize on minor %d\n",
-				s->v4l2dev->minor);
+		IVTV_ERR("Failed to initialize on device %s\n",
+			 video_device_node_name(vdev));
 		mutex_unlock(&itv->serialize_lock);
 		return -ENXIO;
 	}

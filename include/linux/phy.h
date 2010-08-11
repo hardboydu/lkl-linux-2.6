@@ -24,6 +24,7 @@
 #include <linux/mii.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
+#include <linux/mod_devicetable.h>
 
 #include <asm/atomic.h>
 
@@ -79,7 +80,11 @@ typedef enum {
  * Need to be a little smaller than phydev->dev.bus_id to leave room
  * for the ":%02x"
  */
-#define MII_BUS_ID_SIZE	(BUS_ID_SIZE - 3)
+#define MII_BUS_ID_SIZE	(20 - 3)
+
+/* Or MII_ADDR_C45 into regnum for read/write on mii_bus to enable the 21 bit
+   IEEE 802.3ae clause 45 addressing mode used by 10GIGE phy chips. */
+#define MII_ADDR_C45 (1<<30)
 
 /*
  * The Bus class for PHYs.  Devices which provide access to
@@ -127,8 +132,8 @@ int mdiobus_register(struct mii_bus *bus);
 void mdiobus_unregister(struct mii_bus *bus);
 void mdiobus_free(struct mii_bus *bus);
 struct phy_device *mdiobus_scan(struct mii_bus *bus, int addr);
-int mdiobus_read(struct mii_bus *bus, int addr, u16 regnum);
-int mdiobus_write(struct mii_bus *bus, int addr, u16 regnum, u16 val);
+int mdiobus_read(struct mii_bus *bus, int addr, u32 regnum);
+int mdiobus_write(struct mii_bus *bus, int addr, u32 regnum, u16 val);
 
 
 #define PHY_INTERRUPT_DISABLED	0x0
@@ -315,8 +320,7 @@ struct phy_device {
 
 	/* Interrupt and Polling infrastructure */
 	struct work_struct phy_queue;
-	struct work_struct state_queue;
-	struct timer_list phy_timer;
+	struct delayed_work state_queue;
 	atomic_t irq_disable;
 
 	struct mutex lock;
@@ -389,6 +393,12 @@ struct phy_driver {
 	/* Enables or disables interrupts */
 	int (*config_intr)(struct phy_device *phydev);
 
+	/*
+	 * Checks if the PHY generated an interrupt.
+	 * For multi-PHY devices with shared PHY interrupt pin
+	 */
+	int (*did_interrupt)(struct phy_device *phydev);
+
 	/* Clears up any memory if needed */
 	void (*remove)(struct phy_device *phydev);
 
@@ -402,7 +412,7 @@ struct phy_driver {
 /* A Structure for boards to register fixups with the PHY Lib */
 struct phy_fixup {
 	struct list_head list;
-	char bus_id[BUS_ID_SIZE];
+	char bus_id[20];
 	u32 phy_uid;
 	u32 phy_uid_mask;
 	int (*run)(struct phy_device *phydev);
@@ -417,7 +427,7 @@ struct phy_fixup {
  * because the bus read/write functions may wait for an interrupt
  * to conclude the operation.
  */
-static inline int phy_read(struct phy_device *phydev, u16 regnum)
+static inline int phy_read(struct phy_device *phydev, u32 regnum)
 {
 	return mdiobus_read(phydev->bus, phydev->addr, regnum);
 }
@@ -432,17 +442,25 @@ static inline int phy_read(struct phy_device *phydev, u16 regnum)
  * because the bus read/write functions may wait for an interrupt
  * to conclude the operation.
  */
-static inline int phy_write(struct phy_device *phydev, u16 regnum, u16 val)
+static inline int phy_write(struct phy_device *phydev, u32 regnum, u16 val)
 {
 	return mdiobus_write(phydev->bus, phydev->addr, regnum, val);
 }
 
 int get_phy_id(struct mii_bus *bus, int addr, u32 *phy_id);
 struct phy_device* get_phy_device(struct mii_bus *bus, int addr);
+int phy_device_register(struct phy_device *phy);
 int phy_clear_interrupt(struct phy_device *phydev);
 int phy_config_interrupt(struct phy_device *phydev, u32 interrupts);
+int phy_init_hw(struct phy_device *phydev);
+int phy_attach_direct(struct net_device *dev, struct phy_device *phydev,
+		u32 flags, phy_interface_t interface);
 struct phy_device * phy_attach(struct net_device *dev,
 		const char *bus_id, u32 flags, phy_interface_t interface);
+struct phy_device *phy_find_first(struct mii_bus *bus);
+int phy_connect_direct(struct net_device *dev, struct phy_device *phydev,
+		void (*handler)(struct net_device *), u32 flags,
+		phy_interface_t interface);
 struct phy_device * phy_connect(struct net_device *dev, const char *bus_id,
 		void (*handler)(struct net_device *), u32 flags,
 		phy_interface_t interface);
@@ -473,6 +491,7 @@ void phy_driver_unregister(struct phy_driver *drv);
 int phy_driver_register(struct phy_driver *new_driver);
 void phy_prepare_link(struct phy_device *phydev,
 		void (*adjust_link)(struct net_device *));
+void phy_state_machine(struct work_struct *work);
 void phy_start_machine(struct phy_device *phydev,
 		void (*handler)(struct net_device *));
 void phy_stop_machine(struct phy_device *phydev);

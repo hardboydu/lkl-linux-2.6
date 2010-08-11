@@ -47,15 +47,13 @@
 #include <linux/platform_device.h>
 #include <linux/usb.h>
 #include <linux/usb/gadget.h>
+#include <linux/usb/hcd.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/system.h>
 #include <asm/unaligned.h>
-
-
-#include "../core/hcd.h"
 
 
 #define DRIVER_DESC	"USB Host+Gadget Emulator"
@@ -1306,11 +1304,6 @@ restart:
 			setup = *(struct usb_ctrlrequest*) urb->setup_packet;
 			w_index = le16_to_cpu(setup.wIndex);
 			w_value = le16_to_cpu(setup.wValue);
-			if (le16_to_cpu(setup.wLength) !=
-					urb->transfer_buffer_length) {
-				status = -EOVERFLOW;
-				goto return_urb;
-			}
 
 			/* paranoia, in case of stale queued data */
 			list_for_each_entry (req, &ep->queue, queue) {
@@ -1437,7 +1430,7 @@ restart:
 					}
 					if (urb->transfer_buffer_length > 1)
 						buf [1] = 0;
-					urb->actual_length = min (2,
+					urb->actual_length = min_t(u32, 2,
 						urb->transfer_buffer_length);
 					value = 0;
 					status = 0;
@@ -1626,7 +1619,7 @@ static int dummy_hub_control (
 		hub_descriptor ((struct usb_hub_descriptor *) buf);
 		break;
 	case GetHubStatus:
-		*(__le32 *) buf = __constant_cpu_to_le32 (0);
+		*(__le32 *) buf = cpu_to_le32 (0);
 		break;
 	case GetPortStatus:
 		if (wIndex != 1)

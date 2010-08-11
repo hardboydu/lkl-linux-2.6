@@ -33,6 +33,8 @@
 
 #include <linux/mm.h>
 #include <linux/device.h>
+#include <linux/slab.h>
+#include <linux/sched.h>
 
 #include "ipath_kernel.h"
 
@@ -58,8 +60,7 @@ static int __get_user_pages(unsigned long start_page, size_t num_pages,
 	size_t got;
 	int ret;
 
-	lock_limit = current->signal->rlim[RLIMIT_MEMLOCK].rlim_cur >>
-		PAGE_SHIFT;
+	lock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 
 	if (num_pages > lock_limit) {
 		ret = -ENOMEM;
@@ -209,20 +210,20 @@ void ipath_release_user_pages_on_close(struct page **p, size_t num_pages)
 
 	mm = get_task_mm(current);
 	if (!mm)
-		goto bail;
+		return;
 
 	work = kmalloc(sizeof(*work), GFP_KERNEL);
 	if (!work)
 		goto bail_mm;
 
-	goto bail;
-
 	INIT_WORK(&work->work, user_pages_account);
 	work->mm = mm;
 	work->num_pages = num_pages;
 
+	schedule_work(&work->work);
+	return;
+
 bail_mm:
 	mmput(mm);
-bail:
 	return;
 }

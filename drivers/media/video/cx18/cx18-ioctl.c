@@ -4,7 +4,7 @@
  *  Derived from ivtv-ioctl.c
  *
  *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
- *  Copyright (C) 2008  Andy Walls <awalls@radix.net>
+ *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -58,12 +58,21 @@ u16 cx18_service2vbi(int type)
 	}
 }
 
+/* Check if VBI services are allowed on the (field, line) for the video std */
 static int valid_service_line(int field, int line, int is_pal)
 {
-	return (is_pal && line >= 6 && (line != 23 || field == 0)) ||
+	return (is_pal && line >= 6 &&
+		((field == 0 && line <= 23) || (field == 1 && line <= 22))) ||
 	       (!is_pal && line >= 10 && line < 22);
 }
 
+/*
+ * For a (field, line, std) and inbound potential set of services for that line,
+ * return the first valid service of those passed in the incoming set for that
+ * line in priority order:
+ * CC, VPS, or WSS over TELETEXT for well known lines
+ * TELETEXT, before VPS, before CC, before WSS, for other lines
+ */
 static u16 select_service_from_set(int field, int line, u16 set, int is_pal)
 {
 	u16 valid_set = (is_pal ? V4L2_SLICED_VBI_625 : V4L2_SLICED_VBI_525);
@@ -90,6 +99,10 @@ static u16 select_service_from_set(int field, int line, u16 set, int is_pal)
 	return 0;
 }
 
+/*
+ * Expand the service_set of *fmt into valid service_lines for the std,
+ * and clear the passed in fmt->service_set
+ */
 void cx18_expand_service_set(struct v4l2_sliced_vbi_format *fmt, int is_pal)
 {
 	u16 set = fmt->service_set;
@@ -102,7 +115,25 @@ void cx18_expand_service_set(struct v4l2_sliced_vbi_format *fmt, int is_pal)
 	}
 }
 
+/*
+ * Sanitize the service_lines in *fmt per the video std, and return 1
+ * if any service_line is left as valid after santization
+ */
+static int check_service_set(struct v4l2_sliced_vbi_format *fmt, int is_pal)
+{
+	int f, l;
+	u16 set = 0;
 
+	for (f = 0; f < 2; f++) {
+		for (l = 0; l < 24; l++) {
+			fmt->service_lines[f][l] = select_service_from_set(f, l, fmt->service_lines[f][l], is_pal);
+			set |= fmt->service_lines[f][l];
+		}
+	}
+	return set != 0;
+}
+
+/* Compute the service_set from the assumed valid service_lines of *fmt */
 u16 cx18_get_service_set(struct v4l2_sliced_vbi_format *fmt)
 {
 	int f, l;
@@ -129,10 +160,8 @@ static int cx18_g_fmt_vid_cap(struct file *file, void *fh,
 	pixfmt->priv = 0;
 	if (id->type == CX18_ENC_STREAM_TYPE_YUV) {
 		pixfmt->pixelformat = V4L2_PIX_FMT_HM12;
-		/* YUV size is (Y=(h*w) + UV=(h*(w/2))) */
-		pixfmt->sizeimage =
-			pixfmt->height * pixfmt->width +
-			pixfmt->height * (pixfmt->width / 2);
+		/* YUV size is (Y=(h*720) + UV=(h*(720/2))) */
+		pixfmt->sizeimage = pixfmt->height * 720 * 3 / 2;
 		pixfmt->bytesperline = 720;
 	} else {
 		pixfmt->pixelformat = V4L2_PIX_FMT_MPEG;
@@ -149,8 +178,8 @@ static int cx18_g_fmt_vbi_cap(struct file *file, void *fh,
 	struct v4l2_vbi_format *vbifmt = &fmt->fmt.vbi;
 
 	vbifmt->sampling_rate = 27000000;
-	vbifmt->offset = 248;
-	vbifmt->samples_per_line = cx->vbi.raw_decoder_line_size - 4;
+	vbifmt->offset = 248; /* FIXME - slightly wrong for both 50 & 60 Hz */
+	vbifmt->samples_per_line = vbi_active_samples - 4;
 	vbifmt->sample_format = V4L2_PIX_FMT_GREY;
 	vbifmt->start[0] = cx->vbi.start[0];
 	vbifmt->start[1] = cx->vbi.start[1];
@@ -164,7 +193,30 @@ static int cx18_g_fmt_vbi_cap(struct file *file, void *fh,
 static int cx18_g_fmt_sliced_vbi_cap(struct file *file, void *fh,
 					struct v4l2_format *fmt)
 {
-	return -EINVAL;
+	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
+	struct v4l2_sliced_vbi_format *vbifmt = &fmt->fmt.sliced;
+
+	/* sane, V4L2 spec compliant, defaults */
+	vbifmt->reserved[0] = 0;
+	vbifmt->reserved[1] = 0;
+	vbifmt->io_size = sizeof(struct v4l2_sliced_vbi_data) * 36;
+	memset(vbifmt->service_lines, 0, sizeof(vbifmt->service_lines));
+	vbifmt->service_set = 0;
+
+	/*
+	 * Fetch the configured service_lines and total service_set from the
+	 * digitizer/slicer.  Note, cx18_av_vbi() wipes the passed in
+	 * fmt->fmt.sliced under valid calling conditions
+	 */
+	if (v4l2_subdev_call(cx->sd_av, vbi, g_sliced_fmt, &fmt->fmt.sliced))
+		return -EINVAL;
+
+	/* Ensure V4L2 spec compliant output */
+	vbifmt->reserved[0] = 0;
+	vbifmt->reserved[1] = 0;
+	vbifmt->io_size = sizeof(struct v4l2_sliced_vbi_data) * 36;
+	vbifmt->service_set = cx18_get_service_set(vbifmt);
+	return 0;
 }
 
 static int cx18_try_fmt_vid_cap(struct file *file, void *fh,
@@ -174,11 +226,18 @@ static int cx18_try_fmt_vid_cap(struct file *file, void *fh,
 	struct cx18 *cx = id->cx;
 	int w = fmt->fmt.pix.width;
 	int h = fmt->fmt.pix.height;
+	int min_h = 2;
 
 	w = min(w, 720);
-	w = max(w, 1);
+	w = max(w, 2);
+	if (id->type == CX18_ENC_STREAM_TYPE_YUV) {
+		/* YUV height must be a multiple of 32 */
+		h &= ~0x1f;
+		min_h = 32;
+	}
 	h = min(h, cx->is_50hz ? 576 : 480);
-	h = max(h, 2);
+	h = max(h, min_h);
+
 	cx18_g_fmt_vid_cap(file, fh, fmt);
 	fmt->fmt.pix.width = w;
 	fmt->fmt.pix.height = h;
@@ -194,7 +253,20 @@ static int cx18_try_fmt_vbi_cap(struct file *file, void *fh,
 static int cx18_try_fmt_sliced_vbi_cap(struct file *file, void *fh,
 					struct v4l2_format *fmt)
 {
-	return -EINVAL;
+	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
+	struct v4l2_sliced_vbi_format *vbifmt = &fmt->fmt.sliced;
+
+	vbifmt->io_size = sizeof(struct v4l2_sliced_vbi_data) * 36;
+	vbifmt->reserved[0] = 0;
+	vbifmt->reserved[1] = 0;
+
+	/* If given a service set, expand it validly & clear passed in set */
+	if (vbifmt->service_set)
+		cx18_expand_service_set(vbifmt, cx->is_50hz);
+	/* Sanitize the service_lines, and compute the new set if any valid */
+	if (check_service_set(vbifmt, cx->is_50hz))
+		vbifmt->service_set = cx18_get_service_set(vbifmt);
+	return 0;
 }
 
 static int cx18_s_fmt_vid_cap(struct file *file, void *fh,
@@ -202,10 +274,11 @@ static int cx18_s_fmt_vid_cap(struct file *file, void *fh,
 {
 	struct cx18_open_id *id = fh;
 	struct cx18 *cx = id->cx;
+	struct v4l2_mbus_framefmt mbus_fmt;
 	int ret;
 	int w, h;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
@@ -221,9 +294,10 @@ static int cx18_s_fmt_vid_cap(struct file *file, void *fh,
 	if (atomic_read(&cx->ana_capturing) > 0)
 		return -EBUSY;
 
-	cx->params.width = w;
-	cx->params.height = h;
-	cx18_av_cmd(cx, VIDIOC_S_FMT, fmt);
+	mbus_fmt.width = cx->params.width = w;
+	mbus_fmt.height = cx->params.height = h;
+	mbus_fmt.code = V4L2_MBUS_FMT_FIXED;
+	v4l2_subdev_call(cx->sd_av, video, s_mbus_fmt, &mbus_fmt);
 	return cx18_g_fmt_vid_cap(file, fh, fmt);
 }
 
@@ -234,58 +308,135 @@ static int cx18_s_fmt_vbi_cap(struct file *file, void *fh,
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
+	/*
+	 * Changing the Encoder's Raw VBI parameters won't have any effect
+	 * if any analog capture is ongoing
+	 */
 	if (!cx18_raw_vbi(cx) && atomic_read(&cx->ana_capturing) > 0)
 		return -EBUSY;
 
+	/*
+	 * Set the digitizer registers for raw active VBI.
+	 * Note cx18_av_vbi_wipes out alot of the passed in fmt under valid
+	 * calling conditions
+	 */
+	ret = v4l2_subdev_call(cx->sd_av, vbi, s_raw_fmt, &fmt->fmt.vbi);
+	if (ret)
+		return ret;
+
+	/* Store our new v4l2 (non-)sliced VBI state */
 	cx->vbi.sliced_in->service_set = 0;
 	cx->vbi.in.type = V4L2_BUF_TYPE_VBI_CAPTURE;
-	cx18_av_cmd(cx, VIDIOC_S_FMT, fmt);
+
 	return cx18_g_fmt_vbi_cap(file, fh, fmt);
 }
 
 static int cx18_s_fmt_sliced_vbi_cap(struct file *file, void *fh,
 					struct v4l2_format *fmt)
 {
-	return -EINVAL;
+	struct cx18_open_id *id = fh;
+	struct cx18 *cx = id->cx;
+	int ret;
+	struct v4l2_sliced_vbi_format *vbifmt = &fmt->fmt.sliced;
+
+	ret = v4l2_prio_check(&cx->prio, id->prio);
+	if (ret)
+		return ret;
+
+	cx18_try_fmt_sliced_vbi_cap(file, fh, fmt);
+
+	/*
+	 * Changing the Encoder's Raw VBI parameters won't have any effect
+	 * if any analog capture is ongoing
+	 */
+	if (cx18_raw_vbi(cx) && atomic_read(&cx->ana_capturing) > 0)
+		return -EBUSY;
+
+	/*
+	 * Set the service_lines requested in the digitizer/slicer registers.
+	 * Note, cx18_av_vbi() wipes some "impossible" service lines in the
+	 * passed in fmt->fmt.sliced under valid calling conditions
+	 */
+	ret = v4l2_subdev_call(cx->sd_av, vbi, s_sliced_fmt, &fmt->fmt.sliced);
+	if (ret)
+		return ret;
+	/* Store our current v4l2 sliced VBI settings */
+	cx->vbi.in.type =  V4L2_BUF_TYPE_SLICED_VBI_CAPTURE;
+	memcpy(cx->vbi.sliced_in, vbifmt, sizeof(*cx->vbi.sliced_in));
+	return 0;
 }
 
 static int cx18_g_chip_ident(struct file *file, void *fh,
 				struct v4l2_dbg_chip_ident *chip)
 {
 	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
+	int err = 0;
 
 	chip->ident = V4L2_IDENT_NONE;
 	chip->revision = 0;
-	if (v4l2_chip_match_host(&chip->match)) {
-		chip->ident = V4L2_IDENT_CX23418;
-		return 0;
+	switch (chip->match.type) {
+	case V4L2_CHIP_MATCH_HOST:
+		switch (chip->match.addr) {
+		case 0:
+			chip->ident = V4L2_IDENT_CX23418;
+			chip->revision = cx18_read_reg(cx, 0xC72028);
+			break;
+		case 1:
+			/*
+			 * The A/V decoder is always present, but in the rare
+			 * case that the card doesn't have analog, we don't
+			 * use it.  We find it w/o using the cx->sd_av pointer
+			 */
+			cx18_call_hw(cx, CX18_HW_418_AV,
+				     core, g_chip_ident, chip);
+			break;
+		default:
+			/*
+			 * Could return ident = V4L2_IDENT_UNKNOWN if we had
+			 * other host chips at higher addresses, but we don't
+			 */
+			err = -EINVAL; /* per V4L2 spec */
+			break;
+		}
+		break;
+	case V4L2_CHIP_MATCH_I2C_DRIVER:
+		/* If needed, returns V4L2_IDENT_AMBIGUOUS without extra work */
+		cx18_call_all(cx, core, g_chip_ident, chip);
+		break;
+	case V4L2_CHIP_MATCH_I2C_ADDR:
+		/*
+		 * We could return V4L2_IDENT_UNKNOWN, but we don't do the work
+		 * to look if a chip is at the address with no driver.  That's a
+		 * dangerous thing to do with EEPROMs anyway.
+		 */
+		cx18_call_all(cx, core, g_chip_ident, chip);
+		break;
+	default:
+		err = -EINVAL;
+		break;
 	}
-	cx18_call_i2c_clients(cx, VIDIOC_DBG_G_CHIP_IDENT, chip);
-	return 0;
+	return err;
 }
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 static int cx18_cxc(struct cx18 *cx, unsigned int cmd, void *arg)
 {
 	struct v4l2_dbg_register *regs = arg;
-	unsigned long flags;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (regs->reg >= CX18_MEM_OFFSET + CX18_MEM_SIZE)
 		return -EINVAL;
 
-	spin_lock_irqsave(&cx18_cards_lock, flags);
 	regs->size = 4;
-	if (cmd == VIDIOC_DBG_G_REGISTER)
-		regs->val = cx18_read_enc(cx, regs->reg);
-	else
+	if (cmd == VIDIOC_DBG_S_REGISTER)
 		cx18_write_enc(cx, regs->val, regs->reg);
-	spin_unlock_irqrestore(&cx18_cards_lock, flags);
+	else
+		regs->val = cx18_read_enc(cx, regs->reg);
 	return 0;
 }
 
@@ -296,7 +447,8 @@ static int cx18_g_register(struct file *file, void *fh,
 
 	if (v4l2_chip_match_host(&reg->match))
 		return cx18_cxc(cx, VIDIOC_DBG_G_REGISTER, reg);
-	cx18_call_i2c_clients(cx, VIDIOC_DBG_G_REGISTER, reg);
+	/* FIXME - errors shouldn't be ignored */
+	cx18_call_all(cx, core, g_register, reg);
 	return 0;
 }
 
@@ -307,7 +459,8 @@ static int cx18_s_register(struct file *file, void *fh,
 
 	if (v4l2_chip_match_host(&reg->match))
 		return cx18_cxc(cx, VIDIOC_DBG_S_REGISTER, reg);
-	cx18_call_i2c_clients(cx, VIDIOC_DBG_S_REGISTER, reg);
+	/* FIXME - errors shouldn't be ignored */
+	cx18_call_all(cx, core, s_register, reg);
 	return 0;
 }
 #endif
@@ -335,7 +488,8 @@ static int cx18_querycap(struct file *file, void *fh,
 
 	strlcpy(vcap->driver, CX18_DRIVER_NAME, sizeof(vcap->driver));
 	strlcpy(vcap->card, cx->card_name, sizeof(vcap->card));
-	snprintf(vcap->bus_info, sizeof(vcap->bus_info), "PCI:%s", pci_name(cx->dev));
+	snprintf(vcap->bus_info, sizeof(vcap->bus_info),
+		 "PCI:%s", pci_name(cx->pci_dev));
 	vcap->version = CX18_DRIVER_VERSION; 	    /* version */
 	vcap->capabilities = cx->v4l2_cap; 	    /* capabilities */
 	return 0;
@@ -397,13 +551,14 @@ static int cx18_s_crop(struct file *file, void *fh, struct v4l2_crop *crop)
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
 	if (crop->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
-	return cx18_av_cmd(cx, VIDIOC_S_CROP, crop);
+	CX18_DEBUG_WARN("VIDIOC_S_CROP not implemented\n");
+	return -EINVAL;
 }
 
 static int cx18_g_crop(struct file *file, void *fh, struct v4l2_crop *crop)
@@ -412,7 +567,8 @@ static int cx18_g_crop(struct file *file, void *fh, struct v4l2_crop *crop)
 
 	if (crop->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
-	return cx18_av_cmd(cx, VIDIOC_G_CROP, crop);
+	CX18_DEBUG_WARN("VIDIOC_G_CROP not implemented\n");
+	return -EINVAL;
 }
 
 static int cx18_enum_fmt_vid_cap(struct file *file, void *fh,
@@ -447,11 +603,11 @@ int cx18_s_input(struct file *file, void *fh, unsigned int inp)
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
-	if (inp < 0 || inp >= cx->nof_inputs)
+	if (inp >= cx->nof_inputs)
 		return -EINVAL;
 
 	if (inp == cx->active_input) {
@@ -483,7 +639,7 @@ static int cx18_g_frequency(struct file *file, void *fh,
 	if (vf->tuner != 0)
 		return -EINVAL;
 
-	cx18_call_i2c_clients(cx, VIDIOC_G_FREQUENCY, vf);
+	cx18_call_all(cx, tuner, g_frequency, vf);
 	return 0;
 }
 
@@ -493,7 +649,7 @@ int cx18_s_frequency(struct file *file, void *fh, struct v4l2_frequency *vf)
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
@@ -502,7 +658,7 @@ int cx18_s_frequency(struct file *file, void *fh, struct v4l2_frequency *vf)
 
 	cx18_mute(cx);
 	CX18_DEBUG_INFO("v4l2 ioctl: set frequency %d\n", vf->frequency);
-	cx18_call_i2c_clients(cx, VIDIOC_S_FREQUENCY, vf);
+	cx18_call_all(cx, tuner, s_frequency, vf);
 	cx18_unmute(cx);
 	return 0;
 }
@@ -521,7 +677,7 @@ int cx18_s_std(struct file *file, void *fh, v4l2_std_id *std)
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
@@ -547,12 +703,11 @@ int cx18_s_std(struct file *file, void *fh, v4l2_std_id *std)
 	cx->vbi.count = cx->is_50hz ? 18 : 12;
 	cx->vbi.start[0] = cx->is_50hz ? 6 : 10;
 	cx->vbi.start[1] = cx->is_50hz ? 318 : 273;
-	cx->vbi.sliced_decoder_line_size = cx->is_60hz ? 272 : 284;
 	CX18_DEBUG_INFO("Switching standard to %llx.\n",
 			(unsigned long long) cx->std);
 
 	/* Tuner */
-	cx18_call_i2c_clients(cx, VIDIOC_S_STD, &cx->std);
+	cx18_call_all(cx, core, s_std, cx->std);
 	return 0;
 }
 
@@ -562,16 +717,14 @@ static int cx18_s_tuner(struct file *file, void *fh, struct v4l2_tuner *vt)
 	struct cx18 *cx = id->cx;
 	int ret;
 
-	ret = v4l2_prio_check(&cx->prio, &id->prio);
+	ret = v4l2_prio_check(&cx->prio, id->prio);
 	if (ret)
 		return ret;
 
 	if (vt->index != 0)
 		return -EINVAL;
 
-	/* Setting tuner can only set audio mode */
-	cx18_call_i2c_clients(cx, VIDIOC_S_TUNER, vt);
-
+	cx18_call_all(cx, tuner, s_tuner, vt);
 	return 0;
 }
 
@@ -582,7 +735,7 @@ static int cx18_g_tuner(struct file *file, void *fh, struct v4l2_tuner *vt)
 	if (vt->index != 0)
 		return -EINVAL;
 
-	cx18_call_i2c_clients(cx, VIDIOC_G_TUNER, vt);
+	cx18_call_all(cx, tuner, g_tuner, vt);
 
 	if (test_bit(CX18_F_I_RADIO_USER, &cx->i_flags)) {
 		strlcpy(vt->name, "cx18 Radio Tuner", sizeof(vt->name));
@@ -598,13 +751,169 @@ static int cx18_g_tuner(struct file *file, void *fh, struct v4l2_tuner *vt)
 static int cx18_g_sliced_vbi_cap(struct file *file, void *fh,
 					struct v4l2_sliced_vbi_cap *cap)
 {
-	return -EINVAL;
+	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
+	int set = cx->is_50hz ? V4L2_SLICED_VBI_625 : V4L2_SLICED_VBI_525;
+	int f, l;
+
+	if (cap->type != V4L2_BUF_TYPE_SLICED_VBI_CAPTURE)
+		return -EINVAL;
+
+	cap->service_set = 0;
+	for (f = 0; f < 2; f++) {
+		for (l = 0; l < 24; l++) {
+			if (valid_service_line(f, l, cx->is_50hz)) {
+				/*
+				 * We can find all v4l2 supported vbi services
+				 * for the standard, on a valid line for the std
+				 */
+				cap->service_lines[f][l] = set;
+				cap->service_set |= set;
+			} else
+				cap->service_lines[f][l] = 0;
+		}
+	}
+	for (f = 0; f < 3; f++)
+		cap->reserved[f] = 0;
+	return 0;
+}
+
+static int _cx18_process_idx_data(struct cx18_buffer *buf,
+				  struct v4l2_enc_idx *idx)
+{
+	int consumed, remaining;
+	struct v4l2_enc_idx_entry *e_idx;
+	struct cx18_enc_idx_entry *e_buf;
+
+	/* Frame type lookup: 1=I, 2=P, 4=B */
+	const int mapping[8] = {
+		-1, V4L2_ENC_IDX_FRAME_I, V4L2_ENC_IDX_FRAME_P,
+		-1, V4L2_ENC_IDX_FRAME_B, -1, -1, -1
+	};
+
+	/*
+	 * Assumption here is that a buf holds an integral number of
+	 * struct cx18_enc_idx_entry objects and is properly aligned.
+	 * This is enforced by the module options on IDX buffer sizes.
+	 */
+	remaining = buf->bytesused - buf->readpos;
+	consumed = 0;
+	e_idx = &idx->entry[idx->entries];
+	e_buf = (struct cx18_enc_idx_entry *) &buf->buf[buf->readpos];
+
+	while (remaining >= sizeof(struct cx18_enc_idx_entry) &&
+	       idx->entries < V4L2_ENC_IDX_ENTRIES) {
+
+		e_idx->offset = (((u64) le32_to_cpu(e_buf->offset_high)) << 32)
+				| le32_to_cpu(e_buf->offset_low);
+
+		e_idx->pts = (((u64) (le32_to_cpu(e_buf->pts_high) & 1)) << 32)
+			     | le32_to_cpu(e_buf->pts_low);
+
+		e_idx->length = le32_to_cpu(e_buf->length);
+
+		e_idx->flags = mapping[le32_to_cpu(e_buf->flags) & 0x7];
+
+		e_idx->reserved[0] = 0;
+		e_idx->reserved[1] = 0;
+
+		idx->entries++;
+		e_idx = &idx->entry[idx->entries];
+		e_buf++;
+
+		remaining -= sizeof(struct cx18_enc_idx_entry);
+		consumed += sizeof(struct cx18_enc_idx_entry);
+	}
+
+	/* Swallow any partial entries at the end, if there are any */
+	if (remaining > 0 && remaining < sizeof(struct cx18_enc_idx_entry))
+		consumed += remaining;
+
+	buf->readpos += consumed;
+	return consumed;
+}
+
+static int cx18_process_idx_data(struct cx18_stream *s, struct cx18_mdl *mdl,
+				 struct v4l2_enc_idx *idx)
+{
+	if (s->type != CX18_ENC_STREAM_TYPE_IDX)
+		return -EINVAL;
+
+	if (mdl->curr_buf == NULL)
+		mdl->curr_buf = list_first_entry(&mdl->buf_list,
+						 struct cx18_buffer, list);
+
+	if (list_entry_is_past_end(mdl->curr_buf, &mdl->buf_list, list)) {
+		/*
+		 * For some reason we've exhausted the buffers, but the MDL
+		 * object still said some data was unread.
+		 * Fix that and bail out.
+		 */
+		mdl->readpos = mdl->bytesused;
+		return 0;
+	}
+
+	list_for_each_entry_from(mdl->curr_buf, &mdl->buf_list, list) {
+
+		/* Skip any empty buffers in the MDL */
+		if (mdl->curr_buf->readpos >= mdl->curr_buf->bytesused)
+			continue;
+
+		mdl->readpos += _cx18_process_idx_data(mdl->curr_buf, idx);
+
+		/* exit when MDL drained or request satisfied */
+		if (idx->entries >= V4L2_ENC_IDX_ENTRIES ||
+		    mdl->curr_buf->readpos < mdl->curr_buf->bytesused ||
+		    mdl->readpos >= mdl->bytesused)
+			break;
+	}
+	return 0;
 }
 
 static int cx18_g_enc_index(struct file *file, void *fh,
 				struct v4l2_enc_idx *idx)
 {
-	return -EINVAL;
+	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
+	struct cx18_stream *s = &cx->streams[CX18_ENC_STREAM_TYPE_IDX];
+	s32 tmp;
+	struct cx18_mdl *mdl;
+
+	if (!cx18_stream_enabled(s)) /* Module options inhibited IDX stream */
+		return -EINVAL;
+
+	/* Compute the best case number of entries we can buffer */
+	tmp = s->buffers -
+			  s->bufs_per_mdl * CX18_ENC_STREAM_TYPE_IDX_FW_MDL_MIN;
+	if (tmp <= 0)
+		tmp = 1;
+	tmp = tmp * s->buf_size / sizeof(struct cx18_enc_idx_entry);
+
+	/* Fill out the header of the return structure */
+	idx->entries = 0;
+	idx->entries_cap = tmp;
+	memset(idx->reserved, 0, sizeof(idx->reserved));
+
+	/* Pull IDX MDLs and buffers from q_full and populate the entries */
+	do {
+		mdl = cx18_dequeue(s, &s->q_full);
+		if (mdl == NULL) /* No more IDX data right now */
+			break;
+
+		/* Extract the Index entry data from the MDL and buffers */
+		cx18_process_idx_data(s, mdl, idx);
+		if (mdl->readpos < mdl->bytesused) {
+			/* We finished with data remaining, push the MDL back */
+			cx18_push(s, mdl, &s->q_full);
+			break;
+		}
+
+		/* We drained this MDL, schedule it to go to the firmware */
+		cx18_enqueue(s, mdl, &s->q_free);
+
+	} while (idx->entries < V4L2_ENC_IDX_ENTRIES);
+
+	/* Tell the work handler to send free IDX MDLs to the firmware */
+	cx18_stream_load_fw_queue(s);
+	return 0;
 }
 
 static int cx18_encoder_cmd(struct file *file, void *fh,
@@ -708,13 +1017,15 @@ static int cx18_log_status(struct file *file, void *fh)
 	struct v4l2_audio audin;
 	int i;
 
-	CX18_INFO("=================  START STATUS CARD #%d  =================\n", cx->num);
+	CX18_INFO("=================  START STATUS CARD #%d  "
+		  "=================\n", cx->instance);
+	CX18_INFO("Version: %s  Card: %s\n", CX18_VERSION, cx->card_name);
 	if (cx->hw_flags & CX18_HW_TVEEPROM) {
 		struct tveeprom tv;
 
 		cx18_read_eeprom(cx, &tv);
 	}
-	cx18_call_i2c_clients(cx, VIDIOC_LOG_STATUS, NULL);
+	cx18_call_all(cx, core, log_status);
 	cx18_get_input(cx, cx->active_input, &vidin);
 	cx18_get_audio_input(cx, cx->audio_input, &audin);
 	CX18_INFO("Video Input: %s\n", vidin.name);
@@ -725,22 +1036,24 @@ static int cx18_log_status(struct file *file, void *fh)
 	mutex_unlock(&cx->gpio_lock);
 	CX18_INFO("Tuner: %s\n",
 		test_bit(CX18_F_I_RADIO_USER, &cx->i_flags) ?  "Radio" : "TV");
-	cx2341x_log_status(&cx->params, cx->name);
+	cx2341x_log_status(&cx->params, cx->v4l2_dev.name);
 	CX18_INFO("Status flags: 0x%08lx\n", cx->i_flags);
 	for (i = 0; i < CX18_MAX_STREAMS; i++) {
 		struct cx18_stream *s = &cx->streams[i];
 
-		if (s->v4l2dev == NULL || s->buffers == 0)
+		if (s->video_dev == NULL || s->buffers == 0)
 			continue;
 		CX18_INFO("Stream %s: status 0x%04lx, %d%% of %d KiB (%d buffers) in use\n",
 			  s->name, s->s_flags,
-			  atomic_read(&s->q_full.buffers) * 100 / s->buffers,
+			  atomic_read(&s->q_full.depth) * s->bufs_per_mdl * 100
+			   / s->buffers,
 			  (s->buffers * s->buf_size) / 1024, s->buffers);
 	}
 	CX18_INFO("Read MPEG/VBI: %lld/%lld bytes\n",
 			(long long)cx->mpg_data_received,
 			(long long)cx->vbi_data_inserted);
-	CX18_INFO("==================  END STATUS CARD #%d  ==================\n", cx->num);
+	CX18_INFO("==================  END STATUS CARD #%d  "
+		  "==================\n", cx->instance);
 	return 0;
 }
 
@@ -749,20 +1062,12 @@ static long cx18_default(struct file *file, void *fh, int cmd, void *arg)
 	struct cx18 *cx = ((struct cx18_open_id *)fh)->cx;
 
 	switch (cmd) {
-	case VIDIOC_INT_S_AUDIO_ROUTING: {
-		struct v4l2_routing *route = arg;
-
-		CX18_DEBUG_IOCTL("VIDIOC_INT_S_AUDIO_ROUTING(%d, %d)\n",
-			route->input, route->output);
-		cx18_audio_set_route(cx, route);
-		break;
-	}
-
 	case VIDIOC_INT_RESET: {
 		u32 val = *(u32 *)arg;
 
 		if ((val == 0) || (val & 0x01))
-			cx18_reset_ir_gpio(&cx->i2c_algo_cb_data[0]);
+			cx18_call_hw(cx, CX18_HW_GPIO_RESET_CTRL, core, reset,
+				     (u32) CX18_GPIO_RESET_Z8F0811);
 		break;
 	}
 
@@ -781,6 +1086,8 @@ long cx18_v4l2_ioctl(struct file *filp, unsigned int cmd,
 	long res;
 
 	mutex_lock(&cx->serialize_lock);
+
+	/* FIXME - consolidate v4l2_prio_check()'s here */
 
 	if (cx18_debug & CX18_DBGFLG_IOCTL)
 		vfd->debug = V4L2_DEBUG_IOCTL | V4L2_DEBUG_IOCTL_ARG;

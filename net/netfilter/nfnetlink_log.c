@@ -28,6 +28,7 @@
 #include <linux/list.h>
 #include <linux/jhash.h>
 #include <linux/random.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/netfilter/nf_log.h>
 #include <net/netfilter/nfnetlink_log.h>
@@ -296,7 +297,7 @@ nfulnl_alloc_skb(unsigned int inst_size, unsigned int pkt_size)
 	n = max(inst_size, pkt_size);
 	skb = alloc_skb(n, GFP_ATOMIC);
 	if (!skb) {
-		PRINTR("nfnetlink_log: can't alloc whole buffer (%u bytes)\n",
+		pr_notice("nfnetlink_log: can't alloc whole buffer (%u bytes)\n",
 			inst_size);
 
 		if (n > pkt_size) {
@@ -305,7 +306,7 @@ nfulnl_alloc_skb(unsigned int inst_size, unsigned int pkt_size)
 
 			skb = alloc_skb(pkt_size, GFP_ATOMIC);
 			if (!skb)
-				PRINTR("nfnetlink_log: can't even alloc %u "
+				pr_err("nfnetlink_log: can't even alloc %u "
 				       "bytes\n", pkt_size);
 		}
 	}
@@ -323,7 +324,8 @@ __nfulnl_send(struct nfulnl_instance *inst)
 			  NLMSG_DONE,
 			  sizeof(struct nfgenmsg));
 
-	status = nfnetlink_unicast(inst->skb, inst->peer_pid, MSG_DONTWAIT);
+	status = nfnetlink_unicast(inst->skb, &init_net, inst->peer_pid,
+				   MSG_DONTWAIT);
 
 	inst->qlen = 0;
 	inst->skb = NULL;
@@ -581,6 +583,12 @@ nfulnl_log_packet(u_int8_t pf,
 		+ nla_total_size(sizeof(struct nfulnl_msg_packet_hw))
 		+ nla_total_size(sizeof(struct nfulnl_msg_packet_timestamp));
 
+	if (in && skb_mac_header_was_set(skb)) {
+		size +=   nla_total_size(skb->dev->hard_header_len)
+			+ nla_total_size(sizeof(u_int16_t))	/* hwtype */
+			+ nla_total_size(sizeof(u_int16_t));	/* hwlen */
+	}
+
 	spin_lock_bh(&inst->lock);
 
 	if (inst->flags & NFULNL_CFG_F_SEQ)
@@ -660,8 +668,7 @@ nfulnl_rcv_nl_event(struct notifier_block *this,
 {
 	struct netlink_notify *n = ptr;
 
-	if (event == NETLINK_URELEASE &&
-	    n->protocol == NETLINK_NETFILTER && n->pid) {
+	if (event == NETLINK_URELEASE && n->protocol == NETLINK_NETFILTER) {
 		int i;
 
 		/* destroy all instances for this pid */
@@ -672,7 +679,7 @@ nfulnl_rcv_nl_event(struct notifier_block *this,
 			struct hlist_head *head = &instance_table[i];
 
 			hlist_for_each_entry_safe(inst, tmp, t2, head, hlist) {
-				if ((n->net == &init_net) &&
+				if ((net_eq(n->net, &init_net)) &&
 				    (n->pid == inst->peer_pid))
 					__instance_destroy(inst);
 			}
@@ -688,12 +695,13 @@ static struct notifier_block nfulnl_rtnl_notifier = {
 
 static int
 nfulnl_recv_unsupp(struct sock *ctnl, struct sk_buff *skb,
-		  struct nlmsghdr *nlh, struct nlattr *nfqa[])
+		   const struct nlmsghdr *nlh,
+		   const struct nlattr * const nfqa[])
 {
 	return -ENOTSUPP;
 }
 
-static const struct nf_logger nfulnl_logger = {
+static struct nf_logger nfulnl_logger __read_mostly = {
 	.name	= "nfnetlink_log",
 	.logfn	= &nfulnl_log_packet,
 	.me	= THIS_MODULE,
@@ -710,7 +718,8 @@ static const struct nla_policy nfula_cfg_policy[NFULA_CFG_MAX+1] = {
 
 static int
 nfulnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
-		   struct nlmsghdr *nlh, struct nlattr *nfula[])
+		   const struct nlmsghdr *nlh,
+		   const struct nlattr * const nfula[])
 {
 	struct nfgenmsg *nfmsg = NLMSG_DATA(nlh);
 	u_int16_t group_num = ntohs(nfmsg->res_id);
@@ -725,9 +734,9 @@ nfulnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
 		/* Commands without queue context */
 		switch (cmd->command) {
 		case NFULNL_CFG_CMD_PF_BIND:
-			return nf_log_register(pf, &nfulnl_logger);
+			return nf_log_bind_pf(pf, &nfulnl_logger);
 		case NFULNL_CFG_CMD_PF_UNBIND:
-			nf_log_unregister_pf(pf);
+			nf_log_unbind_pf(pf);
 			return 0;
 		}
 	}
@@ -760,7 +769,7 @@ nfulnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
 			}
 
 			instance_destroy(inst);
-			goto out;
+			goto out_put;
 		default:
 			ret = -ENOTSUPP;
 			break;
@@ -952,17 +961,25 @@ static int __init nfnetlink_log_init(void)
 		goto cleanup_netlink_notifier;
 	}
 
+	status = nf_log_register(NFPROTO_UNSPEC, &nfulnl_logger);
+	if (status < 0) {
+		printk(KERN_ERR "log: failed to register logger\n");
+		goto cleanup_subsys;
+	}
+
 #ifdef CONFIG_PROC_FS
 	if (!proc_create("nfnetlink_log", 0440,
 			 proc_net_netfilter, &nful_file_ops))
-		goto cleanup_subsys;
+		goto cleanup_logger;
 #endif
 	return status;
 
 #ifdef CONFIG_PROC_FS
+cleanup_logger:
+	nf_log_unregister(&nfulnl_logger);
+#endif
 cleanup_subsys:
 	nfnetlink_subsys_unregister(&nfulnl_subsys);
-#endif
 cleanup_netlink_notifier:
 	netlink_unregister_notifier(&nfulnl_rtnl_notifier);
 	return status;

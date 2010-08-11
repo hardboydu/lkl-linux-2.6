@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 - 2008 NetEffect, Inc. All rights reserved.
+ * Copyright (c) 2006 - 2009 Intel Corporation.  All rights reserved.
  * Copyright (c) 2005 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -44,6 +44,7 @@
 #include <linux/init.h>
 #include <linux/if_arp.h>
 #include <linux/highmem.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
@@ -110,6 +111,7 @@ static unsigned int sysfs_idx_addr;
 
 static struct pci_device_id nes_pci_table[] = {
 	{PCI_VENDOR_ID_NETEFFECT, PCI_DEVICE_ID_NETEFFECT_NE020, PCI_ANY_ID, PCI_ANY_ID},
+	{PCI_VENDOR_ID_NETEFFECT, PCI_DEVICE_ID_NETEFFECT_NE020_KR, PCI_ANY_ID, PCI_ANY_ID},
 	{0}
 };
 
@@ -478,23 +480,23 @@ static int __devinit nes_probe(struct pci_dev *pcidev, const struct pci_device_i
 	}
 
 	if ((sizeof(dma_addr_t) > 4)) {
-		ret = pci_set_dma_mask(pcidev, DMA_64BIT_MASK);
+		ret = pci_set_dma_mask(pcidev, DMA_BIT_MASK(64));
 		if (ret < 0) {
 			printk(KERN_ERR PFX "64b DMA mask configuration failed\n");
 			goto bail2;
 		}
-		ret = pci_set_consistent_dma_mask(pcidev, DMA_64BIT_MASK);
+		ret = pci_set_consistent_dma_mask(pcidev, DMA_BIT_MASK(64));
 		if (ret) {
 			printk(KERN_ERR PFX "64b DMA consistent mask configuration failed\n");
 			goto bail2;
 		}
 	} else {
-		ret = pci_set_dma_mask(pcidev, DMA_32BIT_MASK);
+		ret = pci_set_dma_mask(pcidev, DMA_BIT_MASK(32));
 		if (ret < 0) {
 			printk(KERN_ERR PFX "32b DMA mask configuration failed\n");
 			goto bail2;
 		}
-		ret = pci_set_consistent_dma_mask(pcidev, DMA_32BIT_MASK);
+		ret = pci_set_consistent_dma_mask(pcidev, DMA_BIT_MASK(32));
 		if (ret) {
 			printk(KERN_ERR PFX "32b DMA consistent mask configuration failed\n");
 			goto bail2;
@@ -521,7 +523,8 @@ static int __devinit nes_probe(struct pci_dev *pcidev, const struct pci_device_i
 	spin_lock_init(&nesdev->indexed_regs_lock);
 
 	/* Remap the PCI registers in adapter BAR0 to kernel VA space */
-	mmio_regs = ioremap_nocache(pci_resource_start(pcidev, BAR_0), sizeof(mmio_regs));
+	mmio_regs = ioremap_nocache(pci_resource_start(pcidev, BAR_0),
+				    pci_resource_len(pcidev, BAR_0));
 	if (mmio_regs == NULL) {
 		printk(KERN_ERR PFX "Unable to remap BAR0\n");
 		ret = -EIO;

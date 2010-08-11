@@ -9,6 +9,7 @@
  * express or implied.
  */
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/of_device.h>
@@ -202,7 +203,7 @@ static struct snd_soc_ops mpc8610_hpcd_ops = {
 static int mpc8610_hpcd_probe(struct of_device *ofdev,
 	const struct of_device_id *match)
 {
-	struct device_node *np = ofdev->node;
+	struct device_node *np = ofdev->dev.of_node;
 	struct device_node *codec_np = NULL;
 	struct device_node *guts_np = NULL;
 	struct device_node *dma_np = NULL;
@@ -353,6 +354,11 @@ static int mpc8610_hpcd_probe(struct of_device *ofdev,
 	}
 	ssi_info.irq = machine_data->ssi_irq;
 
+	/* Do we want to use asynchronous mode? */
+	ssi_info.asynchronous =
+		of_find_property(np, "fsl,ssi-asynchronous", NULL) ? 1 : 0;
+	if (ssi_info.asynchronous)
+		dev_info(&ofdev->dev, "using asynchronous mode\n");
 
 	/* Map the global utilities registers. */
 	guts_np = of_find_compatible_node(NULL, NULL, "fsl,mpc8610-guts");
@@ -574,9 +580,11 @@ static struct of_device_id mpc8610_hpcd_match[] = {
 MODULE_DEVICE_TABLE(of, mpc8610_hpcd_match);
 
 static struct of_platform_driver mpc8610_hpcd_of_driver = {
-	.owner  	= THIS_MODULE,
-	.name   	= "mpc8610_hpcd",
-	.match_table    = mpc8610_hpcd_match,
+	.driver = {
+		.name = "mpc8610_hpcd",
+		.owner = THIS_MODULE,
+		.of_match_table = mpc8610_hpcd_match,
+	},
 	.probe  	= mpc8610_hpcd_probe,
 	.remove 	= mpc8610_hpcd_remove,
 };

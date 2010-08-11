@@ -25,6 +25,13 @@
  *		http://www.ryston.cz/petr/vlb/pdc20230b.html
  *		http://www.ryston.cz/petr/vlb/pdc20230c.html
  *		http://www.ryston.cz/petr/vlb/pdc20630.html
+ *	QDI65x0:
+ *		http://www.ryston.cz/petr/vlb/qd6500.html
+ *		http://www.ryston.cz/petr/vlb/qd6580.html
+ *
+ *	QDI65x0 probe code based on drivers/ide/legacy/qd65xx.c
+ *	Rewritten from the work of Colten Edwards <pje120@cs.usask.ca> by
+ *	Samuel Thibault <samuel.thibault@ens-lyon.org>
  *
  *  Unsupported but docs exist:
  *	Appian/Adaptec AIC25VL01/Cirrus Logic PD7220
@@ -35,7 +42,7 @@
  *  the MPIIX where the tuning is PCI side but the IDE is "ISA side".
  *
  *  Specific support is included for the ht6560a/ht6560b/opti82c611a/
- *  opti82c465mv/promise 20230c/20630/winbond83759A
+ *  opti82c465mv/promise 20230c/20630/qdi65x0/winbond83759A
  *
  *  Use the autospeed and pio_mask options with:
  *	Appian ADI/2 aka CLPD7220 or AIC25VL01.
@@ -48,6 +55,7 @@
  *
  */
 
+#include <linux/async.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -108,6 +116,7 @@ struct legacy_controller {
 	struct ata_port_operations *ops;
 	unsigned int pio_mask;
 	unsigned int flags;
+	unsigned int pflags;
 	int (*setup)(struct platform_device *, struct legacy_probe *probe,
 		struct legacy_data *data);
 };
@@ -129,7 +138,7 @@ static int qdi;			/* Set to probe QDI controllers */
 static int winbond;		/* Set to probe Winbond controllers,
 					give I/O port if non standard */
 static int autospeed;		/* Chip present which snoops speed changes */
-static int pio_mask = 0x1F;	/* PIO range for autospeed devices */
+static int pio_mask = ATA_PIO4;	/* PIO range for autospeed devices */
 static int iordy_mask = 0xFFFFFFFF;	/* Use iordy if available */
 
 /**
@@ -284,9 +293,11 @@ static unsigned int pdc_data_xfer_vlb(struct ata_device *dev,
 			unsigned char *buf, unsigned int buflen, int rw)
 {
 	int slop = buflen & 3;
+	struct ata_port *ap = dev->link->ap;
+
 	/* 32bit I/O capable *and* we need to write a whole number of dwords */
-	if (ata_id_has_dword_io(dev->id) && (slop == 0 || slop == 3)) {
-		struct ata_port *ap = dev->link->ap;
+	if (ata_id_has_dword_io(dev->id) && (slop == 0 || slop == 3)
+					&& (ap->pflags & ATA_PFLAG_PIO32)) {
 		unsigned long flags;
 
 		local_irq_save(flags);
@@ -668,7 +679,7 @@ static void qdi6580dp_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	outb(timing, ld_qdi->timing + 2 * ap->port_no);
 	/* Clear the FIFO */
 	if (adev->class != ATA_DEV_ATA)
-		outb(0x5F, ld_qdi->timing + 3);
+		outb(0x5F, (ld_qdi->timing & 0xFFF0) + 3);
 }
 
 /**
@@ -703,7 +714,7 @@ static void qdi6580_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	outb(timing, ld_qdi->timing + 2 * adev->devno);
 	/* Clear the FIFO */
 	if (adev->class != ATA_DEV_ATA)
-		outb(0x5F, ld_qdi->timing + 3);
+		outb(0x5F, (ld_qdi->timing & 0xFFF0) + 3);
 }
 
 /**
@@ -736,7 +747,8 @@ static unsigned int vlb32_data_xfer(struct ata_device *adev, unsigned char *buf,
 	struct ata_port *ap = adev->link->ap;
 	int slop = buflen & 3;
 
-	if (ata_id_has_dword_io(adev->id) && (slop == 0 || slop == 3)) {
+	if (ata_id_has_dword_io(adev->id) && (slop == 0 || slop == 3)
+					&& (ap->pflags & ATA_PFLAG_PIO32)) {
 		if (rw == WRITE)
 			iowrite32_rep(ap->ioaddr.data_addr, buf, buflen >> 2);
 		else
@@ -782,6 +794,7 @@ static struct ata_port_operations qdi6580_port_ops = {
 static struct ata_port_operations qdi6580dp_port_ops = {
 	.inherits	= &legacy_base_port_ops,
 	.set_piomode	= qdi6580dp_set_piomode,
+	.qc_issue	= qdi_qc_issue,
 	.sff_data_xfer	= vlb32_data_xfer,
 };
 
@@ -858,27 +871,30 @@ static struct ata_port_operations winbond_port_ops = {
 
 static struct legacy_controller controllers[] = {
 	{"BIOS",	&legacy_port_ops, 	0x1F,
-						ATA_FLAG_NO_IORDY,	NULL },
+			ATA_FLAG_NO_IORDY,	0,			NULL },
 	{"Snooping", 	&simple_port_ops, 	0x1F,
-						0	       ,	NULL },
+			0,			0,			NULL },
 	{"PDC20230",	&pdc20230_port_ops,	0x7,
-						ATA_FLAG_NO_IORDY,	NULL },
+			ATA_FLAG_NO_IORDY,
+			ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,	NULL },
 	{"HT6560A",	&ht6560a_port_ops,	0x07,
-						ATA_FLAG_NO_IORDY,	NULL },
+			ATA_FLAG_NO_IORDY,	0,			NULL },
 	{"HT6560B",	&ht6560b_port_ops,	0x1F,
-						ATA_FLAG_NO_IORDY,	NULL },
+			ATA_FLAG_NO_IORDY,	0,			NULL },
 	{"OPTI82C611A",	&opti82c611a_port_ops,	0x0F,
-						0	       ,	NULL },
+			0,			0,			NULL },
 	{"OPTI82C46X",	&opti82c46x_port_ops,	0x0F,
-						0	       ,	NULL },
+			0,			0,			NULL },
 	{"QDI6500",	&qdi6500_port_ops,	0x07,
-					ATA_FLAG_NO_IORDY,	qdi_port },
+			ATA_FLAG_NO_IORDY,
+			ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,    qdi_port },
 	{"QDI6580",	&qdi6580_port_ops,	0x1F,
-					0	       ,	qdi_port },
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE, qdi_port },
 	{"QDI6580DP",	&qdi6580dp_port_ops,	0x1F,
-					0	       ,	qdi_port },
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE, qdi_port },
 	{"W83759A",	&winbond_port_ops,	0x1F,
-					0	       ,	winbond_port }
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,
+								winbond_port }
 };
 
 /**
@@ -1008,6 +1024,7 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 	ap->ops = ops;
 	ap->pio_mask = pio_modes;
 	ap->flags |= ATA_FLAG_SLAVE_POSS | iordy;
+	ap->pflags |= controller->pflags;
 	ap->ioaddr.cmd_addr = io_addr;
 	ap->ioaddr.altstatus_addr = ctrl_addr;
 	ap->ioaddr.ctl_addr = ctrl_addr;
@@ -1020,6 +1037,7 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 				&legacy_sht);
 	if (ret)
 		goto fail;
+	async_synchronize_full();
 	ld->platform_dev = pdev;
 
 	/* Nothing found means we drop the port as its probably not there */
@@ -1032,6 +1050,7 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 			return 0;
 		}
 	}
+	ata_host_detach(host);
 fail:
 	platform_device_unregister(pdev);
 	return ret;

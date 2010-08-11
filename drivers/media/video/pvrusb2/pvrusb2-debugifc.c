@@ -19,11 +19,9 @@
  */
 
 #include <linux/string.h>
-#include <linux/slab.h>
 #include "pvrusb2-debugifc.h"
 #include "pvrusb2-hdw.h"
 #include "pvrusb2-debug.h"
-#include "pvrusb2-i2c-core.h"
 
 struct debugifc_mask_item {
 	const char *name;
@@ -143,13 +141,12 @@ int pvr2_debugifc_print_info(struct pvr2_hdw *hdw,char *buf,unsigned int acnt)
 {
 	int bcnt = 0;
 	int ccnt;
+	ccnt = scnprintf(buf, acnt, "Driver hardware description: %s\n",
+			 pvr2_hdw_get_desc(hdw));
+	bcnt += ccnt; acnt -= ccnt; buf += ccnt;
 	ccnt = scnprintf(buf,acnt,"Driver state info:\n");
 	bcnt += ccnt; acnt -= ccnt; buf += ccnt;
 	ccnt = pvr2_hdw_state_report(hdw,buf,acnt);
-	bcnt += ccnt; acnt -= ccnt; buf += ccnt;
-	ccnt = scnprintf(buf,acnt,"Attached I2C modules:\n");
-	bcnt += ccnt; acnt -= ccnt; buf += ccnt;
-	ccnt = pvr2_i2c_report(hdw,buf,acnt);
 	bcnt += ccnt; acnt -= ccnt; buf += ccnt;
 
 	return bcnt;
@@ -254,11 +251,15 @@ static int pvr2_debugifc_do1cmd(struct pvr2_hdw *hdw,const char *buf,
 			scnt = debugifc_isolate_word(buf,count,&wptr,&wlen);
 			if (scnt && wptr) {
 				count -= scnt; buf += scnt;
-				if (debugifc_match_keyword(wptr,wlen,"prom")) {
-					pvr2_hdw_cpufw_set_enabled(hdw,!0,!0);
-				} else if (debugifc_match_keyword(wptr,wlen,
-								  "ram")) {
-					pvr2_hdw_cpufw_set_enabled(hdw,0,!0);
+				if (debugifc_match_keyword(wptr, wlen,
+							   "prom")) {
+					pvr2_hdw_cpufw_set_enabled(hdw, 2, !0);
+				} else if (debugifc_match_keyword(wptr, wlen,
+								  "ram8k")) {
+					pvr2_hdw_cpufw_set_enabled(hdw, 0, !0);
+				} else if (debugifc_match_keyword(wptr, wlen,
+								  "ram16k")) {
+					pvr2_hdw_cpufw_set_enabled(hdw, 1, !0);
 				} else {
 					return -EINVAL;
 				}

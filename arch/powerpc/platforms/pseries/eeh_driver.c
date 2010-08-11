@@ -63,20 +63,38 @@ static void print_device_node_tree(struct pci_dn *pdn, int dent)
 }
 #endif
 
-/** 
- * irq_in_use - return true if this irq is being used 
+/**
+ * eeh_disable_irq - disable interrupt for the recovering device
  */
-static int irq_in_use(unsigned int irq)
+static void eeh_disable_irq(struct pci_dev *dev)
 {
-	int rc = 0;
-	unsigned long flags;
-   struct irq_desc *desc = irq_desc + irq;
+	struct device_node *dn = pci_device_to_OF_node(dev);
 
-	spin_lock_irqsave(&desc->lock, flags);
-	if (desc->action)
-		rc = 1;
-	spin_unlock_irqrestore(&desc->lock, flags);
-	return rc;
+	/* Don't disable MSI and MSI-X interrupts. They are
+	 * effectively disabled by the DMA Stopped state
+	 * when an EEH error occurs.
+	*/
+	if (dev->msi_enabled || dev->msix_enabled)
+		return;
+
+	if (!irq_has_action(dev->irq))
+		return;
+
+	PCI_DN(dn)->eeh_mode |= EEH_MODE_IRQ_DISABLED;
+	disable_irq_nosync(dev->irq);
+}
+
+/**
+ * eeh_enable_irq - enable interrupt for the recovering device
+ */
+static void eeh_enable_irq(struct pci_dev *dev)
+{
+	struct device_node *dn = pci_device_to_OF_node(dev);
+
+	if ((PCI_DN(dn)->eeh_mode) & EEH_MODE_IRQ_DISABLED) {
+		PCI_DN(dn)->eeh_mode &= ~EEH_MODE_IRQ_DISABLED;
+		enable_irq(dev->irq);
+	}
 }
 
 /* ------------------------------------------------------- */
@@ -88,7 +106,7 @@ static int irq_in_use(unsigned int irq)
  * passed back in "userdata".
  */
 
-static void eeh_report_error(struct pci_dev *dev, void *userdata)
+static int eeh_report_error(struct pci_dev *dev, void *userdata)
 {
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver = dev->driver;
@@ -96,22 +114,21 @@ static void eeh_report_error(struct pci_dev *dev, void *userdata)
 	dev->error_state = pci_channel_io_frozen;
 
 	if (!driver)
-		return;
+		return 0;
 
-	if (irq_in_use (dev->irq)) {
-		struct device_node *dn = pci_device_to_OF_node(dev);
-		PCI_DN(dn)->eeh_mode |= EEH_MODE_IRQ_DISABLED;
-		disable_irq_nosync(dev->irq);
-	}
+	eeh_disable_irq(dev);
+
 	if (!driver->err_handler ||
 	    !driver->err_handler->error_detected)
-		return;
+		return 0;
 
 	rc = driver->err_handler->error_detected (dev, pci_channel_io_frozen);
 
 	/* A driver that needs a reset trumps all others */
 	if (rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
 	if (*res == PCI_ERS_RESULT_NONE) *res = rc;
+
+	return 0;
 }
 
 /**
@@ -122,7 +139,7 @@ static void eeh_report_error(struct pci_dev *dev, void *userdata)
  * Cumulative response passed back in "userdata".
  */
 
-static void eeh_report_mmio_enabled(struct pci_dev *dev, void *userdata)
+static int eeh_report_mmio_enabled(struct pci_dev *dev, void *userdata)
 {
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver = dev->driver;
@@ -130,66 +147,68 @@ static void eeh_report_mmio_enabled(struct pci_dev *dev, void *userdata)
 	if (!driver ||
 	    !driver->err_handler ||
 	    !driver->err_handler->mmio_enabled)
-		return;
+		return 0;
 
 	rc = driver->err_handler->mmio_enabled (dev);
 
 	/* A driver that needs a reset trumps all others */
 	if (rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
 	if (*res == PCI_ERS_RESULT_NONE) *res = rc;
+
+	return 0;
 }
 
 /**
  * eeh_report_reset - tell device that slot has been reset
  */
 
-static void eeh_report_reset(struct pci_dev *dev, void *userdata)
+static int eeh_report_reset(struct pci_dev *dev, void *userdata)
 {
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver = dev->driver;
-	struct device_node *dn = pci_device_to_OF_node(dev);
 
 	if (!driver)
-		return;
+		return 0;
 
-	if ((PCI_DN(dn)->eeh_mode) & EEH_MODE_IRQ_DISABLED) {
-		PCI_DN(dn)->eeh_mode &= ~EEH_MODE_IRQ_DISABLED;
-		enable_irq(dev->irq);
-	}
+	dev->error_state = pci_channel_io_normal;
+
+	eeh_enable_irq(dev);
+
 	if (!driver->err_handler ||
 	    !driver->err_handler->slot_reset)
-		return;
+		return 0;
 
 	rc = driver->err_handler->slot_reset(dev);
 	if ((*res == PCI_ERS_RESULT_NONE) ||
 	    (*res == PCI_ERS_RESULT_RECOVERED)) *res = rc;
 	if (*res == PCI_ERS_RESULT_DISCONNECT &&
 	     rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
+
+	return 0;
 }
 
 /**
  * eeh_report_resume - tell device to resume normal operations
  */
 
-static void eeh_report_resume(struct pci_dev *dev, void *userdata)
+static int eeh_report_resume(struct pci_dev *dev, void *userdata)
 {
 	struct pci_driver *driver = dev->driver;
-	struct device_node *dn = pci_device_to_OF_node(dev);
 
 	dev->error_state = pci_channel_io_normal;
 
 	if (!driver)
-		return;
+		return 0;
 
-	if ((PCI_DN(dn)->eeh_mode) & EEH_MODE_IRQ_DISABLED) {
-		PCI_DN(dn)->eeh_mode &= ~EEH_MODE_IRQ_DISABLED;
-		enable_irq(dev->irq);
-	}
+	eeh_enable_irq(dev);
+
 	if (!driver->err_handler ||
 	    !driver->err_handler->resume)
-		return;
+		return 0;
 
 	driver->err_handler->resume(dev);
+
+	return 0;
 }
 
 /**
@@ -199,25 +218,24 @@ static void eeh_report_resume(struct pci_dev *dev, void *userdata)
  * dead, and that no further recovery attempts will be made on it.
  */
 
-static void eeh_report_failure(struct pci_dev *dev, void *userdata)
+static int eeh_report_failure(struct pci_dev *dev, void *userdata)
 {
 	struct pci_driver *driver = dev->driver;
 
 	dev->error_state = pci_channel_io_perm_failure;
 
 	if (!driver)
-		return;
+		return 0;
 
-	if (irq_in_use (dev->irq)) {
-		struct device_node *dn = pci_device_to_OF_node(dev);
-		PCI_DN(dn)->eeh_mode |= EEH_MODE_IRQ_DISABLED;
-		disable_irq_nosync(dev->irq);
-	}
-	if (!driver->err_handler)
-		return;
-	if (!driver->err_handler->error_detected)
-		return;
+	eeh_disable_irq(dev);
+
+	if (!driver->err_handler ||
+	    !driver->err_handler->error_detected)
+		return 0;
+
 	driver->err_handler->error_detected(dev, pci_channel_io_perm_failure);
+
+	return 0;
 }
 
 /* ------------------------------------------------------- */
@@ -319,7 +337,7 @@ struct pci_dn * handle_eeh_events (struct eeh_event *event)
 		location = location ? location : "unknown";
 		printk(KERN_ERR "EEH: Error: Cannot find partition endpoint "
 		                "for location=%s pci addr=%s\n",
-		        location, pci_name(event->dev));
+		        location, eeh_pci_name(event->dev));
 		return NULL;
 	}
 
@@ -350,7 +368,7 @@ struct pci_dn * handle_eeh_events (struct eeh_event *event)
 		pci_str = pci_name (frozen_pdn->pcidev);
 		drv_str = pcid_name (frozen_pdn->pcidev);
 	} else {
-		pci_str = pci_name (event->dev);
+		pci_str = eeh_pci_name(event->dev);
 		drv_str = pcid_name (event->dev);
 	}
 	
@@ -460,9 +478,9 @@ excess_failures:
 	 * due to actual, failed cards.
 	 */
 	printk(KERN_ERR
-	   "EEH: PCI device at location=%s driver=%s pci addr=%s \n"
+	   "EEH: PCI device at location=%s driver=%s pci addr=%s\n"
 		"has failed %d times in the last hour "
-		"and has been permanently disabled. \n"
+		"and has been permanently disabled.\n"
 		"Please try reseating this device or replacing it.\n",
 		location, drv_str, pci_str, frozen_pdn->eeh_freeze_count);
 	goto perm_error;
@@ -470,7 +488,7 @@ excess_failures:
 hard_fail:
 	printk(KERN_ERR
 	   "EEH: Unable to recover from failure of PCI device "
-	   "at location=%s driver=%s pci addr=%s \n"
+	   "at location=%s driver=%s pci addr=%s\n"
 	   "Please try reseating this device or replacing it.\n",
 		location, drv_str, pci_str);
 

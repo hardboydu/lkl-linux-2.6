@@ -48,6 +48,7 @@
  */
 
 #include <linux/pci.h>	/* for Tavor hack below */
+#include <linux/slab.h>
 
 #include "xprt_rdma.h"
 
@@ -878,8 +879,8 @@ if (strnicmp(ia->ri_id->device->dma_device->bus->name, "pci", 3) == 0) {
 	 * others indicate a transport condition which has already
 	 * undergone a best-effort.
 	 */
-	if (ep->rep_connected == -ECONNREFUSED
-	    && ++retry_count <= RDMA_CONNECT_RETRY_MAX) {
+	if (ep->rep_connected == -ECONNREFUSED &&
+	    ++retry_count <= RDMA_CONNECT_RETRY_MAX) {
 		dprintk("RPC:       %s: non-peer_reject, retry\n", __func__);
 		goto retry;
 	}
@@ -1495,7 +1496,8 @@ rpcrdma_register_frmr_external(struct rpcrdma_mr_seg *seg,
 	frmr_wr.wr.fast_reg.page_shift = PAGE_SHIFT;
 	frmr_wr.wr.fast_reg.length = i << PAGE_SHIFT;
 	frmr_wr.wr.fast_reg.access_flags = (writing ?
-				IB_ACCESS_REMOTE_WRITE : IB_ACCESS_REMOTE_READ);
+				IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE :
+				IB_ACCESS_REMOTE_READ);
 	frmr_wr.wr.fast_reg.rkey = seg1->mr_chunk.rl_mw->r.frmr.fr_mr->rkey;
 	DECR_CQCOUNT(&r_xprt->rx_ep);
 

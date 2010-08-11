@@ -102,6 +102,8 @@ struct uart_sunzilog_port {
 #endif
 };
 
+static void sunzilog_putchar(struct uart_port *port, int ch);
+
 #define ZILOG_CHANNEL_FROM_PORT(PORT)	((struct zilog_channel __iomem *)((PORT)->membase))
 #define UART_ZILOG(PORT)		((struct uart_sunzilog_port *)(PORT))
 
@@ -328,9 +330,9 @@ sunzilog_receive_chars(struct uart_sunzilog_port *up,
 	unsigned char ch, r1, flag;
 
 	tty = NULL;
-	if (up->port.info != NULL &&		/* Unopened serial console */
-	    up->port.info->port.tty != NULL)	/* Keyboard || mouse */
-		tty = up->port.info->port.tty;
+	if (up->port.state != NULL &&		/* Unopened serial console */
+	    up->port.state->port.tty != NULL)	/* Keyboard || mouse */
+		tty = up->port.state->port.tty;
 
 	for (;;) {
 
@@ -451,7 +453,7 @@ static void sunzilog_status_handle(struct uart_sunzilog_port *up,
 			uart_handle_cts_change(&up->port,
 					       (status & CTS));
 
-		wake_up_interruptible(&up->port.info->delta_msr_wait);
+		wake_up_interruptible(&up->port.state->port.delta_msr_wait);
 	}
 
 	up->prev_status = status;
@@ -501,9 +503,9 @@ static void sunzilog_transmit_chars(struct uart_sunzilog_port *up,
 		return;
 	}
 
-	if (up->port.info == NULL)
+	if (up->port.state == NULL)
 		goto ack_tx_int;
-	xmit = &up->port.info->xmit;
+	xmit = &up->port.state->xmit;
 	if (uart_circ_empty(xmit))
 		goto ack_tx_int;
 
@@ -705,7 +707,7 @@ static void sunzilog_start_tx(struct uart_port *port)
 		port->icount.tx++;
 		port->x_char = 0;
 	} else {
-		struct circ_buf *xmit = &port->info->xmit;
+		struct circ_buf *xmit = &port->state->xmit;
 
 		writeb(xmit->buf[xmit->tail], &channel->data);
 		ZSDELAY();
@@ -996,6 +998,50 @@ static int sunzilog_verify_port(struct uart_port *port, struct serial_struct *se
 	return -EINVAL;
 }
 
+#ifdef CONFIG_CONSOLE_POLL
+static int sunzilog_get_poll_char(struct uart_port *port)
+{
+	unsigned char ch, r1;
+	struct uart_sunzilog_port *up = (struct uart_sunzilog_port *) port;
+	struct zilog_channel __iomem *channel
+		= ZILOG_CHANNEL_FROM_PORT(&up->port);
+
+
+	r1 = read_zsreg(channel, R1);
+	if (r1 & (PAR_ERR | Rx_OVR | CRC_ERR)) {
+		writeb(ERR_RES, &channel->control);
+		ZSDELAY();
+		ZS_WSYNC(channel);
+	}
+
+	ch = readb(&channel->control);
+	ZSDELAY();
+
+	/* This funny hack depends upon BRK_ABRT not interfering
+	 * with the other bits we care about in R1.
+	 */
+	if (ch & BRK_ABRT)
+		r1 |= BRK_ABRT;
+
+	if (!(ch & Rx_CH_AV))
+		return NO_POLL_CHAR;
+
+	ch = readb(&channel->data);
+	ZSDELAY();
+
+	ch &= up->parity_mask;
+	return ch;
+}
+
+static void sunzilog_put_poll_char(struct uart_port *port,
+			unsigned char ch)
+{
+	struct uart_sunzilog_port *up = (struct uart_sunzilog_port *)port;
+
+	sunzilog_putchar(&up->port, ch);
+}
+#endif /* CONFIG_CONSOLE_POLL */
+
 static struct uart_ops sunzilog_pops = {
 	.tx_empty	=	sunzilog_tx_empty,
 	.set_mctrl	=	sunzilog_set_mctrl,
@@ -1013,6 +1059,10 @@ static struct uart_ops sunzilog_pops = {
 	.request_port	=	sunzilog_request_port,
 	.config_port	=	sunzilog_config_port,
 	.verify_port	=	sunzilog_verify_port,
+#ifdef CONFIG_CONSOLE_POLL
+	.poll_get_char	=	sunzilog_get_poll_char,
+	.poll_put_char	=	sunzilog_put_poll_char,
+#endif
 };
 
 static int uart_chip_count;
@@ -1180,7 +1230,7 @@ static int __init sunzilog_console_setup(struct console *con, char *options)
 	       (sunzilog_reg.minor - 64) + con->index, con->index);
 
 	/* Get firmware console settings.  */
-	sunserial_console_termios(con);
+	sunserial_console_termios(con, to_of_device(up->port.dev)->dev.of_node);
 
 	/* Firmware console speed is limited to 150-->38400 baud so
 	 * this hackish cflag thing is OK.
@@ -1358,7 +1408,7 @@ static int __devinit zs_probe(struct of_device *op, const struct of_device_id *m
 	int keyboard_mouse = 0;
 	int err;
 
-	if (of_find_property(op->node, "keyboard", NULL))
+	if (of_find_property(op->dev.of_node, "keyboard", NULL))
 		keyboard_mouse = 1;
 
 	/* uarts must come before keyboards/mice */
@@ -1415,8 +1465,9 @@ static int __devinit zs_probe(struct of_device *op, const struct of_device_id *m
 	sunzilog_init_hw(&up[1]);
 
 	if (!keyboard_mouse) {
-		if (sunserial_console_match(SUNZILOG_CONSOLE(), op->node,
-					    &sunzilog_reg, up[0].port.line))
+		if (sunserial_console_match(SUNZILOG_CONSOLE(), op->dev.of_node,
+					    &sunzilog_reg, up[0].port.line,
+					    false))
 			up->flags |= SUNZILOG_FLAG_IS_CONS;
 		err = uart_add_one_port(&sunzilog_reg, &up[0].port);
 		if (err) {
@@ -1424,8 +1475,9 @@ static int __devinit zs_probe(struct of_device *op, const struct of_device_id *m
 				   rp, sizeof(struct zilog_layout));
 			return err;
 		}
-		if (sunserial_console_match(SUNZILOG_CONSOLE(), op->node,
-					    &sunzilog_reg, up[1].port.line))
+		if (sunserial_console_match(SUNZILOG_CONSOLE(), op->dev.of_node,
+					    &sunzilog_reg, up[1].port.line,
+					    false))
 			up->flags |= SUNZILOG_FLAG_IS_CONS;
 		err = uart_add_one_port(&sunzilog_reg, &up[1].port);
 		if (err) {
@@ -1438,12 +1490,12 @@ static int __devinit zs_probe(struct of_device *op, const struct of_device_id *m
 	} else {
 		printk(KERN_INFO "%s: Keyboard at MMIO 0x%llx (irq = %d) "
 		       "is a %s\n",
-		       op->dev.bus_id,
+		       dev_name(&op->dev),
 		       (unsigned long long) up[0].port.mapbase,
 		       op->irqs[0], sunzilog_type(&up[0].port));
 		printk(KERN_INFO "%s: Mouse at MMIO 0x%llx (irq = %d) "
 		       "is a %s\n",
-		       op->dev.bus_id,
+		       dev_name(&op->dev),
 		       (unsigned long long) up[1].port.mapbase,
 		       op->irqs[0], sunzilog_type(&up[1].port));
 		kbm_inst++;
@@ -1489,8 +1541,11 @@ static const struct of_device_id zs_match[] = {
 MODULE_DEVICE_TABLE(of, zs_match);
 
 static struct of_platform_driver zs_driver = {
-	.name		= "zs",
-	.match_table	= zs_match,
+	.driver = {
+		.name = "zs",
+		.owner = THIS_MODULE,
+		.of_match_table = zs_match,
+	},
 	.probe		= zs_probe,
 	.remove		= __devexit_p(zs_remove),
 };

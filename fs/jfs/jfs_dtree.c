@@ -102,6 +102,7 @@
 
 #include <linux/fs.h>
 #include <linux/quotaops.h>
+#include <linux/slab.h>
 #include "jfs_incore.h"
 #include "jfs_superblock.h"
 #include "jfs_filsys.h"
@@ -381,10 +382,10 @@ static u32 add_index(tid_t tid, struct inode *ip, s64 bn, int slot)
 		 * It's time to move the inline table to an external
 		 * page and begin to build the xtree
 		 */
-		if (DQUOT_ALLOC_BLOCK(ip, sbi->nbperpage))
+		if (dquot_alloc_block(ip, sbi->nbperpage))
 			goto clean_up;
 		if (dbAlloc(ip, 0, sbi->nbperpage, &xaddr)) {
-			DQUOT_FREE_BLOCK(ip, sbi->nbperpage);
+			dquot_free_block(ip, sbi->nbperpage);
 			goto clean_up;
 		}
 
@@ -408,7 +409,7 @@ static u32 add_index(tid_t tid, struct inode *ip, s64 bn, int slot)
 			memcpy(&jfs_ip->i_dirtable, temp_table,
 			       sizeof (temp_table));
 			dbFree(ip, xaddr, sbi->nbperpage);
-			DQUOT_FREE_BLOCK(ip, sbi->nbperpage);
+			dquot_free_block(ip, sbi->nbperpage);
 			goto clean_up;
 		}
 		ip->i_size = PSIZE;
@@ -1027,10 +1028,9 @@ static int dtSplitUp(tid_t tid,
 			n = xlen;
 
 		/* Allocate blocks to quota. */
-		if (DQUOT_ALLOC_BLOCK(ip, n)) {
-			rc = -EDQUOT;
+		rc = dquot_alloc_block(ip, n);
+		if (rc)
 			goto extendOut;
-		}
 		quota_allocation += n;
 
 		if ((rc = dbReAlloc(sbi->ipbmap, xaddr, (s64) xlen,
@@ -1308,7 +1308,7 @@ static int dtSplitUp(tid_t tid,
 
 	/* Rollback quota allocation */
 	if (rc && quota_allocation)
-		DQUOT_FREE_BLOCK(ip, quota_allocation);
+		dquot_free_block(ip, quota_allocation);
 
       dtSplitUp_Exit:
 
@@ -1369,9 +1369,10 @@ static int dtSplitPage(tid_t tid, struct inode *ip, struct dtsplit * split,
 		return -EIO;
 
 	/* Allocate blocks to quota. */
-	if (DQUOT_ALLOC_BLOCK(ip, lengthPXD(pxd))) {
+	rc = dquot_alloc_block(ip, lengthPXD(pxd));
+	if (rc) {
 		release_metapage(rmp);
-		return -EDQUOT;
+		return rc;
 	}
 
 	jfs_info("dtSplitPage: ip:0x%p smp:0x%p rmp:0x%p", ip, smp, rmp);
@@ -1892,6 +1893,7 @@ static int dtSplitRoot(tid_t tid,
 	struct dt_lock *dtlck;
 	struct tlock *tlck;
 	struct lv *lv;
+	int rc;
 
 	/* get split root page */
 	smp = split->mp;
@@ -1916,9 +1918,10 @@ static int dtSplitRoot(tid_t tid,
 	rp = rmp->data;
 
 	/* Allocate blocks to quota. */
-	if (DQUOT_ALLOC_BLOCK(ip, lengthPXD(pxd))) {
+	rc = dquot_alloc_block(ip, lengthPXD(pxd));
+	if (rc) {
 		release_metapage(rmp);
-		return -EDQUOT;
+		return rc;
 	}
 
 	BT_MARK_DIRTY(rmp, ip);
@@ -2287,7 +2290,7 @@ static int dtDeleteUp(tid_t tid, struct inode *ip,
 	xlen = lengthPXD(&fp->header.self);
 
 	/* Free quota allocation. */
-	DQUOT_FREE_BLOCK(ip, xlen);
+	dquot_free_block(ip, xlen);
 
 	/* free/invalidate its buffer page */
 	discard_metapage(fmp);
@@ -2363,7 +2366,7 @@ static int dtDeleteUp(tid_t tid, struct inode *ip,
 				xlen = lengthPXD(&p->header.self);
 
 				/* Free quota allocation */
-				DQUOT_FREE_BLOCK(ip, xlen);
+				dquot_free_block(ip, xlen);
 
 				/* free/invalidate its buffer page */
 				discard_metapage(mp);

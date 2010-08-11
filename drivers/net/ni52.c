@@ -109,7 +109,6 @@ static int fifo = 0x8;	/* don't change */
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -170,7 +169,7 @@ static int     ni52_probe1(struct net_device *dev, int ioaddr);
 static irqreturn_t ni52_interrupt(int irq, void *dev_id);
 static int     ni52_open(struct net_device *dev);
 static int     ni52_close(struct net_device *dev);
-static int     ni52_send_packet(struct sk_buff *, struct net_device *);
+static netdev_tx_t ni52_send_packet(struct sk_buff *, struct net_device *);
 static struct  net_device_stats *ni52_get_stats(struct net_device *dev);
 static void    set_multicast_list(struct net_device *dev);
 static void    ni52_timeout(struct net_device *dev);
@@ -284,7 +283,7 @@ static int ni52_open(struct net_device *dev)
 	startrecv586(dev);
 	ni_enaint();
 
-	ret = request_irq(dev->irq, &ni52_interrupt, 0, dev->name, dev);
+	ret = request_irq(dev->irq, ni52_interrupt, 0, dev->name, dev);
 	if (ret) {
 		ni_reset586();
 		return ret;
@@ -441,6 +440,18 @@ out:
 	return ERR_PTR(err);
 }
 
+static const struct net_device_ops ni52_netdev_ops = {
+	.ndo_open		= ni52_open,
+	.ndo_stop		= ni52_close,
+	.ndo_get_stats		= ni52_get_stats,
+	.ndo_tx_timeout 	= ni52_timeout,
+	.ndo_start_xmit 	= ni52_send_packet,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __init ni52_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, size, retval;
@@ -465,8 +476,8 @@ static int __init ni52_probe1(struct net_device *dev, int ioaddr)
 	for (i = 0; i < ETH_ALEN; i++)
 		dev->dev_addr[i] = inb(dev->base_addr+i);
 
-	if (dev->dev_addr[0] != NI52_ADDR0 || dev->dev_addr[1] != NI52_ADDR1
-		 || dev->dev_addr[2] != NI52_ADDR2) {
+	if (dev->dev_addr[0] != NI52_ADDR0 || dev->dev_addr[1] != NI52_ADDR1 ||
+	    dev->dev_addr[2] != NI52_ADDR2) {
 		retval = -ENODEV;
 		goto out;
 	}
@@ -561,15 +572,8 @@ static int __init ni52_probe1(struct net_device *dev, int ioaddr)
 		printk("IRQ %d (assigned and not checked!).\n", dev->irq);
 	}
 
-	dev->open		= ni52_open;
-	dev->stop		= ni52_close;
-	dev->get_stats		= ni52_get_stats;
-	dev->tx_timeout 	= ni52_timeout;
+	dev->netdev_ops		= &ni52_netdev_ops;
 	dev->watchdog_timeo	= HZ/20;
-	dev->hard_start_xmit 	= ni52_send_packet;
-	dev->set_multicast_list = set_multicast_list;
-
-	dev->if_port 		= 0;
 
 	return 0;
 out:
@@ -591,8 +595,8 @@ static int init586(struct net_device *dev)
 	struct iasetup_cmd_struct __iomem *ias_cmd;
 	struct tdr_cmd_struct __iomem *tdr_cmd;
 	struct mcsetup_cmd_struct __iomem *mc_cmd;
-	struct dev_mc_list *dmi = dev->mc_list;
-	int num_addrs = dev->mc_count;
+	struct netdev_hw_addr *ha;
+	int num_addrs = netdev_mc_count(dev);
 
 	ptr = p->scb + 1;
 
@@ -610,10 +614,10 @@ static int init586(struct net_device *dev)
 	/* addr_len |!src_insert |pre-len |loopback */
 	writeb(0x2e, &cfg_cmd->adr_len);
 	writeb(0x00, &cfg_cmd->priority);
-	writeb(0x60, &cfg_cmd->ifs);;
+	writeb(0x60, &cfg_cmd->ifs);
 	writeb(0x00, &cfg_cmd->time_low);
 	writeb(0xf2, &cfg_cmd->time_high);
-	writeb(0x00, &cfg_cmd->promisc);;
+	writeb(0x00, &cfg_cmd->promisc);
 	if (dev->flags & IFF_ALLMULTI) {
 		int len = ((char __iomem *)p->iscp - (char __iomem *)ptr - 8) / 6;
 		if (num_addrs > len) {
@@ -719,9 +723,9 @@ static int init586(struct net_device *dev)
 		writew(0xffff, &mc_cmd->cmd_link);
 		writew(num_addrs * 6, &mc_cmd->mc_cnt);
 
-		for (i = 0; i < num_addrs; i++, dmi = dmi->next)
-			memcpy_toio(mc_cmd->mc_list[i],
-							dmi->dmi_addr, 6);
+		i = 0;
+		netdev_for_each_mc_addr(ha, dev)
+			memcpy_toio(mc_cmd->mc_list[i++], ha->addr, 6);
 
 		writew(make16(mc_cmd), &p->scb->cbl_offset);
 		writeb(CUC_START, &p->scb->cmd_cuc);
@@ -1143,7 +1147,7 @@ static void ni52_timeout(struct net_device *dev)
 		writeb(CUC_START, &p->scb->cmd_cuc);
 		ni_attn586();
 		wait_for_scb_cmd(dev);
-		dev->trans_start = jiffies;
+		dev->trans_start = jiffies; /* prevent tx timeout */
 		return 0;
 	}
 #endif
@@ -1161,14 +1165,15 @@ static void ni52_timeout(struct net_device *dev)
 		ni52_close(dev);
 		ni52_open(dev);
 	}
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 }
 
 /******************************************************
  * send frame
  */
 
-static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ni52_send_packet(struct sk_buff *skb,
+				    struct net_device *dev)
 {
 	int len, i;
 #ifndef NO_NOPCOMMANDS
@@ -1178,7 +1183,7 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	if (skb->len > XMIT_BUFF_SIZE) {
 		printk(KERN_ERR "%s: Sorry, max. framelength is %d bytes. The length of your frame is %d bytes.\n", dev->name, XMIT_BUFF_SIZE, skb->len);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	netif_stop_queue(dev);
@@ -1213,7 +1218,6 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 			writeb(CUC_START, &p->scb->cmd_cuc);
 		}
 		ni_attn586();
-		dev->trans_start = jiffies;
 		if (!i)
 			dev_kfree_skb(skb);
 		wait_for_scb_cmd(dev);
@@ -1235,7 +1239,6 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 	writew(0, &p->nop_cmds[next_nop]->cmd_status);
 
 	writew(make16(p->xmit_cmds[0]), &p->nop_cmds[p->nop_point]->cmd_link);
-	dev->trans_start = jiffies;
 	p->nop_point = next_nop;
 	dev_kfree_skb(skb);
 #	endif
@@ -1251,7 +1254,6 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 	writew(0, &p->nop_cmds[next_nop]->cmd_status);
 	writew(make16(p->xmit_cmds[p->xmit_count]),
 				&p->nop_cmds[p->xmit_count]->cmd_link);
-	dev->trans_start = jiffies;
 	p->xmit_count = next_nop;
 	{
 		unsigned long flags;
@@ -1262,7 +1264,7 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 	}
 	dev_kfree_skb(skb);
 #endif
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*******************************************

@@ -168,6 +168,16 @@ typedef struct elf64_fdesc {
 	__u64	gp;
 } Elf64_Fdesc;
 
+#ifdef __KERNEL__
+
+#ifdef CONFIG_64BIT
+#define Elf_Fdesc	Elf64_Fdesc
+#else
+#define Elf_Fdesc	Elf32_Fdesc
+#endif /*CONFIG_64BIT*/
+
+#endif /*__KERNEL__*/
+
 /* Legal values for p_type field of Elf32_Phdr/Elf64_Phdr.  */
 
 #define PT_HP_TLS		(PT_LOOS + 0x0)
@@ -318,7 +328,6 @@ struct pt_regs;	/* forward declaration... */
    such function.  */
 #define ELF_PLAT_INIT(_r, load_addr)       _r->gr[23] = 0
 
-#define USE_ELF_CORE_DUMP
 #define ELF_EXEC_PAGESIZE	4096
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical

@@ -78,7 +78,6 @@ static char lancestr[] = "LANCE";
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -94,6 +93,7 @@ static char lancestr[] = "LANCE";
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/gfp.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -923,7 +923,7 @@ static int lance_open(struct net_device *dev)
 
 	STOP_LANCE(lp);
 
-	if (request_irq(dev->irq, &lance_interrupt, IRQF_SHARED,
+	if (request_irq(dev->irq, lance_interrupt, IRQF_SHARED,
 			lancestr, (void *) dev)) {
 		printk(KERN_ERR "Lance: Can't get irq %d\n", dev->irq);
 		return -EAGAIN;
@@ -1003,7 +1003,7 @@ static int lance_reset(struct net_device *dev)
 	}
 	lp->init_ring(dev);
 	load_csrs(lp);
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	status = init_restart_lance(lp);
 	return status;
 }
@@ -1054,7 +1054,7 @@ static void lance_piocopy_from_skb(void __iomem *dest, unsigned char *src, int l
 		}
 		src = (char *) p16;
 		break;
-	};
+	}
 	if (len >= 2) {
 		u16 val = src[0] << 8 | src[1];
 		sbus_writew(val, piobuf);
@@ -1160,19 +1160,17 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_unlock_irq(&lp->lock);
 
-	dev->trans_start = jiffies;
 	dev_kfree_skb(skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* taken from the depca driver */
 static void lance_load_multicast(struct net_device *dev)
 {
 	struct lance_private *lp = netdev_priv(dev);
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct netdev_hw_addr *ha;
 	char *addrs;
-	int i;
 	u32 crc;
 	u32 val;
 
@@ -1196,9 +1194,8 @@ static void lance_load_multicast(struct net_device *dev)
 		return;
 
 	/* Add addresses */
-	for (i = 0; i < dev->mc_count; i++) {
-		addrs = dmi->dmi_addr;
-		dmi   = dmi->next;
+	netdev_for_each_mc_addr(ha, dev) {
+		addrs = ha->addr;
 
 		/* multicast address? */
 		if (!(*addrs & 1))
@@ -1311,11 +1308,22 @@ static const struct ethtool_ops sparc_lance_ethtool_ops = {
 	.get_link		= sparc_lance_get_link,
 };
 
+static const struct net_device_ops sparc_lance_ops = {
+	.ndo_open		= lance_open,
+	.ndo_stop		= lance_close,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_set_multicast_list	= lance_set_multicast,
+	.ndo_tx_timeout		= lance_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __devinit sparc_lance_probe_one(struct of_device *op,
 					   struct of_device *ledma,
 					   struct of_device *lebuffer)
 {
-	struct device_node *dp = op->node;
+	struct device_node *dp = op->dev.of_node;
 	static unsigned version_printed;
 	struct lance_private *lp;
 	struct net_device *dev;
@@ -1402,7 +1410,7 @@ static int __devinit sparc_lance_probe_one(struct of_device *op,
 
 	lp->burst_sizes = 0;
 	if (lp->ledma) {
-		struct device_node *ledma_dp = ledma->node;
+		struct device_node *ledma_dp = ledma->dev.of_node;
 		struct device_node *sbus_dp;
 		unsigned int sbmask;
 		const char *prop;
@@ -1462,13 +1470,9 @@ no_link_test:
 
 	lp->dev = dev;
 	SET_NETDEV_DEV(dev, &op->dev);
-	dev->open = &lance_open;
-	dev->stop = &lance_close;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->tx_timeout = &lance_tx_timeout;
 	dev->watchdog_timeo = 5*HZ;
-	dev->set_multicast_list = &lance_set_multicast;
 	dev->ethtool_ops = &sparc_lance_ethtool_ops;
+	dev->netdev_ops = &sparc_lance_ops;
 
 	dev->irq = op->irqs[0];
 
@@ -1502,7 +1506,7 @@ fail:
 static int __devinit sunlance_sbus_probe(struct of_device *op, const struct of_device_id *match)
 {
 	struct of_device *parent = to_of_device(op->dev.parent);
-	struct device_node *parent_dp = parent->node;
+	struct device_node *parent_dp = parent->dev.of_node;
 	int err;
 
 	if (!strcmp(parent_dp->name, "ledma")) {
@@ -1541,8 +1545,11 @@ static const struct of_device_id sunlance_sbus_match[] = {
 MODULE_DEVICE_TABLE(of, sunlance_sbus_match);
 
 static struct of_platform_driver sunlance_sbus_driver = {
-	.name		= "sunlance",
-	.match_table	= sunlance_sbus_match,
+	.driver = {
+		.name = "sunlance",
+		.owner = THIS_MODULE,
+		.of_match_table = sunlance_sbus_match,
+	},
 	.probe		= sunlance_sbus_probe,
 	.remove		= __devexit_p(sunlance_sbus_remove),
 };

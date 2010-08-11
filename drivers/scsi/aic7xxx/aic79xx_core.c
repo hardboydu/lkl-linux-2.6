@@ -1034,7 +1034,7 @@ ahd_intr(struct ahd_softc *ahd)
 }
 
 /******************************** Private Inlines *****************************/
-static __inline void
+static inline void
 ahd_assert_atn(struct ahd_softc *ahd)
 {
 	ahd_outb(ahd, SCSISIGO, ATNO);
@@ -1069,7 +1069,7 @@ ahd_currently_packetized(struct ahd_softc *ahd)
 	return (packetized);
 }
 
-static __inline int
+static inline int
 ahd_set_active_fifo(struct ahd_softc *ahd)
 {
 	u_int active_fifo;
@@ -1086,7 +1086,7 @@ ahd_set_active_fifo(struct ahd_softc *ahd)
 	}
 }
 
-static __inline void
+static inline void
 ahd_unbusy_tcl(struct ahd_softc *ahd, u_int tcl)
 {
 	ahd_busy_tcl(ahd, tcl, SCB_LIST_NULL);
@@ -1096,7 +1096,7 @@ ahd_unbusy_tcl(struct ahd_softc *ahd, u_int tcl)
  * Determine whether the sequencer reported a residual
  * for this SCB/transaction.
  */
-static __inline void
+static inline void
 ahd_update_residual(struct ahd_softc *ahd, struct scb *scb)
 {
 	uint32_t sgptr;
@@ -1106,7 +1106,7 @@ ahd_update_residual(struct ahd_softc *ahd, struct scb *scb)
 		ahd_calc_residual(ahd, scb);
 }
 
-static __inline void
+static inline void
 ahd_complete_scb(struct ahd_softc *ahd, struct scb *scb)
 {
 	uint32_t sgptr;
@@ -2487,7 +2487,7 @@ ahd_handle_scsiint(struct ahd_softc *ahd, u_int intstat)
 		/*
 		 * Although the driver does not care about the
 		 * 'Selection in Progress' status bit, the busy
-		 * LED does.  SELINGO is only cleared by a sucessfull
+		 * LED does.  SELINGO is only cleared by a successfull
 		 * selection, so we must manually clear it to insure
 		 * the LED turns off just incase no future successful
 		 * selections occur (e.g. no devices on the bus).
@@ -3171,13 +3171,16 @@ ahd_handle_nonpkt_busfree(struct ahd_softc *ahd)
 				tinfo->curr.transport_version = 2;
 				tinfo->goal.transport_version = 2;
 				tinfo->goal.ppr_options = 0;
-				/*
-				 * Remove any SCBs in the waiting for selection
-				 * queue that may also be for this target so
-				 * that command ordering is preserved.
-				 */
-				ahd_freeze_devq(ahd, scb);
-				ahd_qinfifo_requeue_tail(ahd, scb);
+				if (scb != NULL) {
+					/*
+					 * Remove any SCBs in the waiting
+					 * for selection queue that may
+					 * also be for this target so that
+					 * command ordering is preserved.
+					 */
+					ahd_freeze_devq(ahd, scb);
+					ahd_qinfifo_requeue_tail(ahd, scb);
+				}
 				printerror = 0;
 			}
 		} else if (ahd_sent_msg(ahd, AHDMSG_EXT, MSG_EXT_WDTR, FALSE)
@@ -3194,13 +3197,16 @@ ahd_handle_nonpkt_busfree(struct ahd_softc *ahd)
 				      MSG_EXT_WDTR_BUS_8_BIT,
 				      AHD_TRANS_CUR|AHD_TRANS_GOAL,
 				      /*paused*/TRUE);
-			/*
-			 * Remove any SCBs in the waiting for selection
-			 * queue that may also be for this target so that
-			 * command ordering is preserved.
-			 */
-			ahd_freeze_devq(ahd, scb);
-			ahd_qinfifo_requeue_tail(ahd, scb);
+			if (scb != NULL) {
+				/*
+				 * Remove any SCBs in the waiting for
+				 * selection queue that may also be for
+				 * this target so that command ordering
+				 * is preserved.
+				 */
+				ahd_freeze_devq(ahd, scb);
+				ahd_qinfifo_requeue_tail(ahd, scb);
+			}
 			printerror = 0;
 		} else if (ahd_sent_msg(ahd, AHDMSG_EXT, MSG_EXT_SDTR, FALSE)
 			&& ppr_busfree == 0) {
@@ -3217,13 +3223,16 @@ ahd_handle_nonpkt_busfree(struct ahd_softc *ahd)
 					/*ppr_options*/0,
 					AHD_TRANS_CUR|AHD_TRANS_GOAL,
 					/*paused*/TRUE);
-			/*
-			 * Remove any SCBs in the waiting for selection
-			 * queue that may also be for this target so that
-			 * command ordering is preserved.
-			 */
-			ahd_freeze_devq(ahd, scb);
-			ahd_qinfifo_requeue_tail(ahd, scb);
+			if (scb != NULL) {
+				/*
+				 * Remove any SCBs in the waiting for
+				 * selection queue that may also be for
+				 * this target so that command ordering
+				 * is preserved.
+				 */
+				ahd_freeze_devq(ahd, scb);
+				ahd_qinfifo_requeue_tail(ahd, scb);
+			}
 			printerror = 0;
 		} else if ((ahd->msg_flags & MSG_FLAG_EXPECT_IDE_BUSFREE) != 0
 			&& ahd_sent_msg(ahd, AHDMSG_1B,
@@ -3251,7 +3260,7 @@ ahd_handle_nonpkt_busfree(struct ahd_softc *ahd)
 	 * the message phases.  We check it last in case we
 	 * had to send some other message that caused a busfree.
 	 */
-	if (printerror != 0
+	if (scb != NULL && printerror != 0
 	 && (lastphase == P_MESGIN || lastphase == P_MESGOUT)
 	 && ((ahd->msg_flags & MSG_FLAG_EXPECT_PPR_BUSFREE) != 0)) {
 
@@ -7987,7 +7996,7 @@ ahd_resume(struct ahd_softc *ahd)
  * scbid that should be restored once manipualtion
  * of the TCL entry is complete.
  */
-static __inline u_int
+static inline u_int
 ahd_index_busy_tcl(struct ahd_softc *ahd, u_int *saved_scbid, u_int tcl)
 {
 	/*

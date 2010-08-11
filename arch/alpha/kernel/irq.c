@@ -18,7 +18,6 @@
 #include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/interrupt.h>
-#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/irq.h>
@@ -55,7 +54,7 @@ int irq_select_affinity(unsigned int irq)
 		cpu = (cpu < (NR_CPUS-1) ? cpu + 1 : 0);
 	last_cpu = cpu;
 
-	irq_desc[irq].affinity = cpumask_of_cpu(cpu);
+	cpumask_copy(irq_desc[irq].affinity, cpumask_of(cpu));
 	irq_desc[irq].chip->set_affinity(irq, cpumask_of(cpu));
 	return 0;
 }
@@ -81,7 +80,7 @@ show_interrupts(struct seq_file *p, void *v)
 #endif
 
 	if (irq < ACTUAL_NR_IRQS) {
-		spin_lock_irqsave(&irq_desc[irq].lock, flags);
+		raw_spin_lock_irqsave(&irq_desc[irq].lock, flags);
 		action = irq_desc[irq].action;
 		if (!action) 
 			goto unlock;
@@ -90,9 +89,9 @@ show_interrupts(struct seq_file *p, void *v)
 		seq_printf(p, "%10u ", kstat_irqs(irq));
 #else
 		for_each_online_cpu(j)
-			seq_printf(p, "%10u ", kstat_cpu(j).irqs[irq]);
+			seq_printf(p, "%10u ", kstat_irqs_cpu(irq, j));
 #endif
-		seq_printf(p, " %14s", irq_desc[irq].chip->typename);
+		seq_printf(p, " %14s", irq_desc[irq].chip->name);
 		seq_printf(p, "  %c%s",
 			(action->flags & IRQF_DISABLED)?'+':' ',
 			action->name);
@@ -105,7 +104,7 @@ show_interrupts(struct seq_file *p, void *v)
 
 		seq_putc(p, '\n');
 unlock:
-		spin_unlock_irqrestore(&irq_desc[irq].lock, flags);
+		raw_spin_unlock_irqrestore(&irq_desc[irq].lock, flags);
 	} else if (irq == ACTUAL_NR_IRQS) {
 #ifdef CONFIG_SMP
 		seq_puts(p, "IPI: ");

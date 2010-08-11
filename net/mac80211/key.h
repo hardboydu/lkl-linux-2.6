@@ -46,6 +46,8 @@ struct sta_info;
  *	acceleration.
  * @KEY_FLAG_TODO_DEFKEY: Key is default key and debugfs needs to be updated.
  * @KEY_FLAG_TODO_ADD_DEBUGFS: Key needs to be added to debugfs.
+ * @KEY_FLAG_TODO_DEFMGMTKEY: Key is default management key and debugfs needs
+ *	to be updated.
  */
 enum ieee80211_internal_key_flags {
 	KEY_FLAG_UPLOADED_TO_HARDWARE	= BIT(0),
@@ -54,13 +56,20 @@ enum ieee80211_internal_key_flags {
 	KEY_FLAG_TODO_HWACCEL_REMOVE	= BIT(3),
 	KEY_FLAG_TODO_DEFKEY		= BIT(4),
 	KEY_FLAG_TODO_ADD_DEBUGFS	= BIT(5),
+	KEY_FLAG_TODO_DEFMGMTKEY	= BIT(6),
+};
+
+enum ieee80211_internal_tkip_state {
+	TKIP_STATE_NOT_INIT,
+	TKIP_STATE_PHASE1_DONE,
+	TKIP_STATE_PHASE1_HW_UPLOADED,
 };
 
 struct tkip_ctx {
 	u32 iv32;
 	u16 iv16;
 	u16 p1k[5];
-	int initialized;
+	enum ieee80211_internal_tkip_state state;
 };
 
 struct ieee80211_key {
@@ -96,6 +105,16 @@ struct ieee80211_key {
 			u8 tx_crypto_buf[6 * AES_BLOCK_LEN];
 			u8 rx_crypto_buf[6 * AES_BLOCK_LEN];
 		} ccmp;
+		struct {
+			u8 tx_pn[6];
+			u8 rx_pn[6];
+			struct crypto_cipher *tfm;
+			u32 replays; /* dot11RSNAStatsCMACReplays */
+			u32 icverrors; /* dot11RSNAStatsCMACICVErrors */
+			/* scratch buffers for virt_to_page() (crypto API) */
+			u8 tx_crypto_buf[2 * AES_BLOCK_LEN];
+			u8 rx_crypto_buf[2 * AES_BLOCK_LEN];
+		} aes_cmac;
 	} u;
 
 	/* number of times this key has been used */
@@ -105,17 +124,6 @@ struct ieee80211_key {
 	struct {
 		struct dentry *stalink;
 		struct dentry *dir;
-		struct dentry *keylen;
-		struct dentry *flags;
-		struct dentry *keyidx;
-		struct dentry *hw_key_idx;
-		struct dentry *tx_rx_count;
-		struct dentry *algorithm;
-		struct dentry *tx_spec;
-		struct dentry *rx_spec;
-		struct dentry *replays;
-		struct dentry *key;
-		struct dentry *ifindex;
 		int cnt;
 	} debugfs;
 #endif
@@ -130,7 +138,8 @@ struct ieee80211_key {
 struct ieee80211_key *ieee80211_key_alloc(enum ieee80211_key_alg alg,
 					  int idx,
 					  size_t key_len,
-					  const u8 *key_data);
+					  const u8 *key_data,
+					  size_t seq_len, const u8 *seq);
 /*
  * Insert a key into data structures (sdata, sta if necessary)
  * to make it used, free old key.
@@ -140,6 +149,8 @@ void ieee80211_key_link(struct ieee80211_key *key,
 			struct sta_info *sta);
 void ieee80211_key_free(struct ieee80211_key *key);
 void ieee80211_set_default_key(struct ieee80211_sub_if_data *sdata, int idx);
+void ieee80211_set_default_mgmt_key(struct ieee80211_sub_if_data *sdata,
+				    int idx);
 void ieee80211_free_keys(struct ieee80211_sub_if_data *sdata);
 void ieee80211_enable_keys(struct ieee80211_sub_if_data *sdata);
 void ieee80211_disable_keys(struct ieee80211_sub_if_data *sdata);

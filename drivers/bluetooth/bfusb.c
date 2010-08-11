@@ -257,8 +257,7 @@ static inline int bfusb_recv_block(struct bfusb_data *data, int hdr, unsigned ch
 
 	if (hdr & 0x10) {
 		BT_ERR("%s error in block", data->hdev->name);
-		if (data->reassembly)
-			kfree_skb(data->reassembly);
+		kfree_skb(data->reassembly);
 		data->reassembly = NULL;
 		return -EIO;
 	}
@@ -704,7 +703,7 @@ static int bfusb_probe(struct usb_interface *intf, const struct usb_device_id *i
 
 	data->hdev = hdev;
 
-	hdev->type = HCI_USB;
+	hdev->bus = HCI_USB;
 	hdev->driver_data = data;
 	SET_HCIDEV_DEV(hdev, &intf->dev);
 

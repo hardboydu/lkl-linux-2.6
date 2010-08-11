@@ -32,13 +32,14 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/log2.h>
+#include <linux/etherdevice.h>
+#include <linux/mii.h>
 #include "../8390.h"
 
 #include <pcmcia/cs_types.h>
@@ -69,15 +70,6 @@
 
 static const char *if_names[] = { "auto", "10baseT", "10base2"};
 
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-module_param(pc_debug, int, 0);
-#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
-static char *version =
-"pcnet_cs.c 1.153 2003/11/09 18:53:09 (David Hinds)";
-#else
-#define DEBUG(n, args...)
-#endif
 
 /*====================================================================*/
 
@@ -216,7 +208,6 @@ static hw_info_t dl10022_info = { 0, 0, 0, 0, IS_DL10022|HAS_MII };
 
 typedef struct pcnet_dev_t {
 	struct pcmcia_device	*p_dev;
-    dev_node_t		node;
     u_int		flags;
     void		__iomem *base;
     struct timer_list	watchdog;
@@ -233,6 +224,23 @@ static inline pcnet_dev_t *PRIV(struct net_device *dev)
 	return (pcnet_dev_t *)(p + sizeof(struct ei_device));
 }
 
+static const struct net_device_ops pcnet_netdev_ops = {
+	.ndo_open		= pcnet_open,
+	.ndo_stop		= pcnet_close,
+	.ndo_set_config		= set_config,
+	.ndo_start_xmit 	= ei_start_xmit,
+	.ndo_get_stats		= ei_get_stats,
+	.ndo_do_ioctl 		= ei_ioctl,
+	.ndo_set_multicast_list = ei_set_multicast_list,
+	.ndo_tx_timeout 	= ei_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller 	= ei_poll,
+#endif
+};
+
 /*======================================================================
 
     pcnet_attach() creates an "instance" of the driver, allocating
@@ -246,7 +254,7 @@ static int pcnet_probe(struct pcmcia_device *link)
     pcnet_dev_t *info;
     struct net_device *dev;
 
-    DEBUG(0, "pcnet_attach()\n");
+    dev_dbg(&link->dev, "pcnet_attach()\n");
 
     /* Create new ethernet device */
     dev = __alloc_ei_netdev(sizeof(pcnet_dev_t));
@@ -255,14 +263,10 @@ static int pcnet_probe(struct pcmcia_device *link)
     info->p_dev = link;
     link->priv = dev;
 
-    link->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING;
-    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.IntType = INT_MEMORY_AND_IO;
 
-    dev->open = &pcnet_open;
-    dev->stop = &pcnet_close;
-    dev->set_config = &set_config;
+    dev->netdev_ops = &pcnet_netdev_ops;
 
     return pcnet_config(link);
 } /* pcnet_attach */
@@ -280,10 +284,9 @@ static void pcnet_detach(struct pcmcia_device *link)
 {
 	struct net_device *dev = link->priv;
 
-	DEBUG(0, "pcnet_detach(0x%p)\n", link);
+	dev_dbg(&link->dev, "pcnet_detach\n");
 
-	if (link->dev_node)
-		unregister_netdev(dev);
+	unregister_netdev(dev);
 
 	pcnet_release(link);
 
@@ -309,32 +312,27 @@ static hw_info_t *get_hwinfo(struct pcmcia_device *link)
     req.Attributes = WIN_DATA_WIDTH_8|WIN_MEMORY_TYPE_AM|WIN_ENABLE;
     req.Base = 0; req.Size = 0;
     req.AccessSpeed = 0;
-    i = pcmcia_request_window(&link, &req, &link->win);
-    if (i != 0) {
-	cs_error(link, RequestWindow, i);
+    i = pcmcia_request_window(link, &req, &link->win);
+    if (i != 0)
 	return NULL;
-    }
 
     virt = ioremap(req.Base, req.Size);
     mem.Page = 0;
     for (i = 0; i < NR_INFO; i++) {
 	mem.CardOffset = hw_info[i].offset & ~(req.Size-1);
-	pcmcia_map_mem_page(link->win, &mem);
+	pcmcia_map_mem_page(link, link->win, &mem);
 	base = &virt[hw_info[i].offset & (req.Size-1)];
 	if ((readb(base+0) == hw_info[i].a0) &&
 	    (readb(base+2) == hw_info[i].a1) &&
-	    (readb(base+4) == hw_info[i].a2))
-	    break;
-    }
-    if (i < NR_INFO) {
-	for (j = 0; j < 6; j++)
-	    dev->dev_addr[j] = readb(base + (j<<1));
+	    (readb(base+4) == hw_info[i].a2)) {
+		for (j = 0; j < 6; j++)
+		    dev->dev_addr[j] = readb(base + (j<<1));
+		break;
+	}
     }
 
     iounmap(virt);
-    j = pcmcia_release_window(link->win);
-    if (j != 0)
-	cs_error(link, ReleaseWindow, j);
+    j = pcmcia_release_window(link, link->win);
     return (i < NR_INFO) ? hw_info+i : NULL;
 } /* get_hwinfo */
 
@@ -479,9 +477,6 @@ static hw_info_t *get_hwired(struct pcmcia_device *link)
 
 ======================================================================*/
 
-#define CS_CHECK(fn, ret) \
-do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
-
 static int try_io_port(struct pcmcia_device *link)
 {
     int j, ret;
@@ -490,8 +485,6 @@ static int try_io_port(struct pcmcia_device *link)
 	if (link->io.NumPorts2 > 0) {
 	    /* for master/slave multifunction cards */
 	    link->io.Attributes2 = IO_DATA_PATH_WIDTH_8;
-	    link->irq.Attributes =
-		IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED;
 	}
     } else {
 	/* This should be two 16-port windows */
@@ -551,19 +544,18 @@ static int pcnet_config(struct pcmcia_device *link)
 {
     struct net_device *dev = link->priv;
     pcnet_dev_t *info = PRIV(dev);
-    int last_ret, last_fn, start_pg, stop_pg, cm_offset;
+    int ret, start_pg, stop_pg, cm_offset;
     int has_shmem = 0;
     hw_info_t *local_hw_info;
 
-    DEBUG(0, "pcnet_config(0x%p)\n", link);
+    dev_dbg(&link->dev, "pcnet_config\n");
 
-    last_ret = pcmcia_loop_config(link, pcnet_confcheck, &has_shmem);
-    if (last_ret) {
-	cs_error(link, RequestIO, last_ret);
+    ret = pcmcia_loop_config(link, pcnet_confcheck, &has_shmem);
+    if (ret)
 	goto failed;
-    }
 
-    CS_CHECK(RequestIRQ, pcmcia_request_irq(link, &link->irq));
+    if (!link->irq)
+	    goto failed;
 
     if (link->io.NumPorts2 == 8) {
 	link->conf.Attributes |= CONF_ENABLE_SPKR;
@@ -573,8 +565,10 @@ static int pcnet_config(struct pcmcia_device *link)
 	(link->card_id == PRODID_IBM_HOME_AND_AWAY))
 	link->conf.ConfigIndex |= 0x10;
 
-    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link, &link->conf));
-    dev->irq = link->irq.AssignedIRQ;
+    ret = pcmcia_request_configuration(link, &link->conf);
+    if (ret)
+	    goto failed;
+    dev->irq = link->irq;
     dev->base_addr = link->io.BasePort1;
     if (info->flags & HAS_MISC_REG) {
 	if ((if_port == 1) || (if_port == 2))
@@ -585,8 +579,8 @@ static int pcnet_config(struct pcmcia_device *link)
 	dev->if_port = 0;
     }
 
-    if ((link->conf.ConfigBase == 0x03c0)
-	&& (link->manf_id == 0x149) && (link->card_id == 0xc1ab)) {
+    if ((link->conf.ConfigBase == 0x03c0) &&
+	(link->manf_id == 0x149) && (link->card_id == 0xc1ab)) {
 	printk(KERN_INFO "pcnet_cs: this is an AX88190 card!\n");
 	printk(KERN_INFO "pcnet_cs: use axnet_cs instead.\n");
 	goto failed;
@@ -640,25 +634,15 @@ static int pcnet_config(struct pcmcia_device *link)
 
     SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
-    if (info->flags & (IS_DL10019|IS_DL10022)) {
-	dev->do_ioctl = &ei_ioctl;
+    if (info->flags & (IS_DL10019|IS_DL10022))
 	mii_phy_probe(dev);
-    }
 
-    link->dev_node = &info->node;
-    SET_NETDEV_DEV(dev, &handle_to_dev(link));
-
-#ifdef CONFIG_NET_POLL_CONTROLLER
-    dev->poll_controller = ei_poll;
-#endif
+    SET_NETDEV_DEV(dev, &link->dev);
 
     if (register_netdev(dev) != 0) {
 	printk(KERN_NOTICE "pcnet_cs: register_netdev() failed\n");
-	link->dev_node = NULL;
 	goto failed;
     }
-
-    strcpy(info->node.dev_name, dev->name);
 
     if (info->flags & (IS_DL10019|IS_DL10022)) {
 	u_char id = inb(dev->base_addr + 0x1a);
@@ -677,8 +661,6 @@ static int pcnet_config(struct pcmcia_device *link)
     printk(" hw_addr %pM\n", dev->dev_addr);
     return 0;
 
-cs_failed:
-    cs_error(link, last_fn, last_ret);
 failed:
     pcnet_release(link);
     return -ENODEV;
@@ -696,7 +678,7 @@ static void pcnet_release(struct pcmcia_device *link)
 {
 	pcnet_dev_t *info = PRIV(link->priv);
 
-	DEBUG(0, "pcnet_release(0x%p)\n", link);
+	dev_dbg(&link->dev, "pcnet_release\n");
 
 	if (info->flags & USE_SHMEM)
 		iounmap(info->base);
@@ -950,7 +932,7 @@ static void mii_phy_probe(struct net_device *dev)
 	phyid = tmp << 16;
 	phyid |= mdio_read(mii_addr, i, MII_PHYID_REG2);
 	phyid &= MII_PHYID_REV_MASK;
-	DEBUG(0, "%s: MII at %d is 0x%08x\n", dev->name, i, phyid);
+	pr_debug("%s: MII at %d is 0x%08x\n", dev->name, i, phyid);
 	if (phyid == AM79C9XX_HOME_PHY) {
 	    info->pna_phy = i;
 	} else if (phyid != AM79C9XX_ETH_PHY) {
@@ -966,7 +948,7 @@ static int pcnet_open(struct net_device *dev)
     struct pcmcia_device *link = info->p_dev;
     unsigned int nic_base = dev->base_addr;
 
-    DEBUG(2, "pcnet_open('%s')\n", dev->name);
+    dev_dbg(&link->dev, "pcnet_open('%s')\n", dev->name);
 
     if (!pcmcia_dev_present(link))
 	return -ENODEV;
@@ -998,7 +980,7 @@ static int pcnet_close(struct net_device *dev)
     pcnet_dev_t *info = PRIV(dev);
     struct pcmcia_device *link = info->p_dev;
 
-    DEBUG(2, "pcnet_close('%s')\n", dev->name);
+    dev_dbg(&link->dev, "pcnet_close('%s')\n", dev->name);
 
     ei_close(dev);
     free_irq(dev->irq, dev);
@@ -1181,18 +1163,20 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 static int ei_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
     pcnet_dev_t *info = PRIV(dev);
-    u16 *data = (u16 *)&rq->ifr_ifru;
+    struct mii_ioctl_data *data = if_mii(rq);
     unsigned int mii_addr = dev->base_addr + DLINK_GPIO;
+
+    if (!(info->flags & (IS_DL10019|IS_DL10022)))
+	return -EINVAL;
+
     switch (cmd) {
     case SIOCGMIIPHY:
-	data[0] = info->phy_id;
+	data->phy_id = info->phy_id;
     case SIOCGMIIREG:		/* Read MII PHY register. */
-	data[3] = mdio_read(mii_addr, data[0], data[1] & 0x1f);
+	data->val_out = mdio_read(mii_addr, data->phy_id, data->reg_num & 0x1f);
 	return 0;
     case SIOCSMIIREG:		/* Write MII PHY register. */
-	if (!capable(CAP_NET_ADMIN))
-	    return -EPERM;
-	mdio_write(mii_addr, data[0], data[1] & 0x1f, data[2]);
+	mdio_write(mii_addr, data->phy_id, data->reg_num & 0x1f, data->val_in);
 	return 0;
     }
     return -EOPNOTSUPP;
@@ -1239,10 +1223,8 @@ static void dma_block_input(struct net_device *dev, int count,
     int xfer_count = count;
     char *buf = skb->data;
 
-#ifdef PCMCIA_DEBUG
     if ((ei_debug > 4) && (count != 4))
-	printk(KERN_DEBUG "%s: [bi=%d]\n", dev->name, count+4);
-#endif
+	pr_debug("%s: [bi=%d]\n", dev->name, count+4);
     if (ei_status.dmaing) {
 	printk(KERN_NOTICE "%s: DMAing conflict in dma_block_input."
 	       "[DMAstat:%1x][irqlock:%1x]\n",
@@ -1483,7 +1465,7 @@ static int setup_shmem_window(struct pcmcia_device *link, int start_pg,
     pcnet_dev_t *info = PRIV(dev);
     win_req_t req;
     memreq_t mem;
-    int i, window_size, offset, last_ret, last_fn;
+    int i, window_size, offset, ret;
 
     window_size = (stop_pg - start_pg) << 8;
     if (window_size > 32 * 1024)
@@ -1497,13 +1479,17 @@ static int setup_shmem_window(struct pcmcia_device *link, int start_pg,
     req.Attributes |= WIN_USE_WAIT;
     req.Base = 0; req.Size = window_size;
     req.AccessSpeed = mem_speed;
-    CS_CHECK(RequestWindow, pcmcia_request_window(&link, &req, &link->win));
+    ret = pcmcia_request_window(link, &req, &link->win);
+    if (ret)
+	    goto failed;
 
     mem.CardOffset = (start_pg << 8) + cm_offset;
     offset = mem.CardOffset % window_size;
     mem.CardOffset -= offset;
     mem.Page = 0;
-    CS_CHECK(MapMemPage, pcmcia_map_mem_page(link->win, &mem));
+    ret = pcmcia_map_mem_page(link, link->win, &mem);
+    if (ret)
+	    goto failed;
 
     /* Try scribbling on the buffer */
     info->base = ioremap(req.Base, window_size);
@@ -1515,8 +1501,8 @@ static int setup_shmem_window(struct pcmcia_device *link, int start_pg,
     pcnet_reset_8390(dev);
     if (i != (TX_PAGES<<8)) {
 	iounmap(info->base);
-	pcmcia_release_window(link->win);
-	info->base = NULL; link->win = NULL;
+	pcmcia_release_window(link, link->win);
+	info->base = NULL; link->win = 0;
 	goto failed;
     }
 
@@ -1537,8 +1523,6 @@ static int setup_shmem_window(struct pcmcia_device *link, int start_pg,
     info->flags |= USE_SHMEM;
     return 0;
 
-cs_failed:
-    cs_error(link, last_fn, last_ret);
 failed:
     return 1;
 }
@@ -1554,6 +1538,7 @@ static struct pcmcia_device_id pcnet_ids[] = {
 	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x021b, 0x0101),
 	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x08a1, 0xc0ab),
 	PCMCIA_PFC_DEVICE_PROD_ID12(0, "AnyCom", "Fast Ethernet + 56K COMBO", 0x578ba6e7, 0xb0ac62c4),
+	PCMCIA_PFC_DEVICE_PROD_ID12(0, "ATKK", "LM33-PCM-T", 0xba9eb7e2, 0x077c174e),
 	PCMCIA_PFC_DEVICE_PROD_ID12(0, "D-Link", "DME336T", 0x1a424a1c, 0xb23897ff),
 	PCMCIA_PFC_DEVICE_PROD_ID12(0, "Grey Cell", "GCS3000", 0x2a151fac, 0x48b932ae),
 	PCMCIA_PFC_DEVICE_PROD_ID12(0, "Linksys", "EtherFast 10&100 + 56K PC Card (PCMLM56)", 0x0733cc81, 0xb3765033),
@@ -1713,6 +1698,7 @@ static struct pcmcia_device_id pcnet_ids[] = {
 	PCMCIA_DEVICE_PROD_ID12("PRETEC", "Ethernet CompactLAN 10BaseT 3.3V", 0xebf91155, 0x7f5a4f50),
 	PCMCIA_DEVICE_PROD_ID12("Psion Dacom", "Gold Card Ethernet", 0xf5f025c2, 0x3a30e110),
 	PCMCIA_DEVICE_PROD_ID12("=RELIA==", "Ethernet", 0xcdd0644a, 0x00b2e941),
+	PCMCIA_DEVICE_PROD_ID12("RIOS Systems Co.", "PC CARD3 ETHERNET", 0x7dd33481, 0x10b41826),
 	PCMCIA_DEVICE_PROD_ID12("RP", "1625B Ethernet NE2000 Compatible", 0xe3e66e22, 0xb96150df),
 	PCMCIA_DEVICE_PROD_ID12("RPTI", "EP400 Ethernet NE2000 Compatible", 0xdc6f88fd, 0x4a7e2ae0),
 	PCMCIA_DEVICE_PROD_ID12("RPTI", "EP401 Ethernet NE2000 Compatible", 0xdc6f88fd, 0x4bcbd7fd),
@@ -1736,25 +1722,33 @@ static struct pcmcia_device_id pcnet_ids[] = {
 	PCMCIA_DEVICE_PROD_ID2("EN-6200P2", 0xa996d078),
 	/* too generic! */
 	/* PCMCIA_DEVICE_PROD_ID12("PCMCIA", "10/100 Ethernet Card", 0x281f1c5d, 0x11b0ffc0), */
-	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "PCMCIA", "EN2218-LAN/MODEM", 0x281f1c5d, 0x570f348e, "PCMLM28.cis"),
-	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "PCMCIA", "UE2218-LAN/MODEM", 0x281f1c5d, 0x6fdcacee, "PCMLM28.cis"),
-	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "Psion Dacom", "Gold Card V34 Ethernet", 0xf5f025c2, 0x338e8155, "PCMLM28.cis"),
-	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "Psion Dacom", "Gold Card V34 Ethernet GSM", 0xf5f025c2, 0x4ae85d35, "PCMLM28.cis"),
-	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "LINKSYS", "PCMLM28", 0xf7cb0b07, 0x66881874, "PCMLM28.cis"),
-	PCMCIA_MFC_DEVICE_CIS_PROD_ID12(0, "DAYNA COMMUNICATIONS", "LAN AND MODEM MULTIFUNCTION", 0x8fdf8f89, 0xdd5ed9e8, "DP83903.cis"),
-	PCMCIA_MFC_DEVICE_CIS_PROD_ID4(0, "NSC MF LAN/Modem", 0x58fc6056, "DP83903.cis"),
-	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0175, 0x0000, "DP83903.cis"),
-	PCMCIA_DEVICE_CIS_MANF_CARD(0xc00f, 0x0002, "LA-PCM.cis"),
-	PCMCIA_DEVICE_CIS_PROD_ID12("KTI", "PE520 PLUS", 0xad180345, 0x9d58d392, "PE520.cis"),
-	PCMCIA_DEVICE_CIS_PROD_ID12("NDC", "Ethernet", 0x01c43ae1, 0x00b2e941, "NE2K.cis"),
-	PCMCIA_DEVICE_CIS_PROD_ID12("PMX   ", "PE-200", 0x34f3f1c8, 0x10b59f8c, "PE-200.cis"),
-	PCMCIA_DEVICE_CIS_PROD_ID12("TAMARACK", "Ethernet", 0xcf434fba, 0x00b2e941, "tamarack.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "PCMCIA", "EN2218-LAN/MODEM", 0x281f1c5d, 0x570f348e, "cis/PCMLM28.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "PCMCIA", "UE2218-LAN/MODEM", 0x281f1c5d, 0x6fdcacee, "cis/PCMLM28.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "Psion Dacom", "Gold Card V34 Ethernet", 0xf5f025c2, 0x338e8155, "cis/PCMLM28.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "Psion Dacom", "Gold Card V34 Ethernet GSM", 0xf5f025c2, 0x4ae85d35, "cis/PCMLM28.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "LINKSYS", "PCMLM28", 0xf7cb0b07, 0x66881874, "cis/PCMLM28.cis"),
+	PCMCIA_PFC_DEVICE_CIS_PROD_ID12(0, "TOSHIBA", "Modem/LAN Card", 0xb4585a1a, 0x53f922f8, "cis/PCMLM28.cis"),
+	PCMCIA_MFC_DEVICE_CIS_PROD_ID12(0, "DAYNA COMMUNICATIONS", "LAN AND MODEM MULTIFUNCTION", 0x8fdf8f89, 0xdd5ed9e8, "cis/DP83903.cis"),
+	PCMCIA_MFC_DEVICE_CIS_PROD_ID4(0, "NSC MF LAN/Modem", 0x58fc6056, "cis/DP83903.cis"),
+	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0175, 0x0000, "cis/DP83903.cis"),
+	PCMCIA_DEVICE_CIS_PROD_ID12("Allied Telesis,K.K", "Ethernet LAN Card", 0x2ad62f3c, 0x9fd2f0a2, "cis/LA-PCM.cis"),
+	PCMCIA_DEVICE_CIS_PROD_ID12("KTI", "PE520 PLUS", 0xad180345, 0x9d58d392, "cis/PE520.cis"),
+	PCMCIA_DEVICE_CIS_PROD_ID12("NDC", "Ethernet", 0x01c43ae1, 0x00b2e941, "cis/NE2K.cis"),
+	PCMCIA_DEVICE_CIS_PROD_ID12("PMX   ", "PE-200", 0x34f3f1c8, 0x10b59f8c, "cis/PE-200.cis"),
+	PCMCIA_DEVICE_CIS_PROD_ID12("TAMARACK", "Ethernet", 0xcf434fba, 0x00b2e941, "cis/tamarack.cis"),
 	PCMCIA_DEVICE_PROD_ID12("Ethernet", "CF Size PC Card", 0x00b2e941, 0x43ac239b),
 	PCMCIA_DEVICE_PROD_ID123("Fast Ethernet", "CF Size PC Card", "1.0",
 		0xb4be14e3, 0x43ac239b, 0x0877b627),
 	PCMCIA_DEVICE_NULL
 };
 MODULE_DEVICE_TABLE(pcmcia, pcnet_ids);
+MODULE_FIRMWARE("cis/PCMLM28.cis");
+MODULE_FIRMWARE("cis/DP83903.cis");
+MODULE_FIRMWARE("cis/LA-PCM.cis");
+MODULE_FIRMWARE("cis/PE520.cis");
+MODULE_FIRMWARE("cis/NE2K.cis");
+MODULE_FIRMWARE("cis/PE-200.cis");
+MODULE_FIRMWARE("cis/tamarack.cis");
 
 static struct pcmcia_driver pcnet_driver = {
 	.drv		= {
@@ -1775,7 +1769,6 @@ static int __init init_pcnet_cs(void)
 
 static void __exit exit_pcnet_cs(void)
 {
-    DEBUG(0, "pcnet_cs: unloading\n");
     pcmcia_unregister_driver(&pcnet_driver);
 }
 

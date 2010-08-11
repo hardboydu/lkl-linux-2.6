@@ -5,7 +5,9 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
@@ -13,6 +15,11 @@
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_limit.h>
+
+struct xt_limit_priv {
+	unsigned long prev;
+	uint32_t credit;
+};
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Herve Eychenne <rv@wallfire.org>");
@@ -58,20 +65,20 @@ static DEFINE_SPINLOCK(limit_lock);
 #define CREDITS_PER_JIFFY POW2_BELOW32(MAX_CPJ)
 
 static bool
-limit_mt(const struct sk_buff *skb, const struct xt_match_param *par)
+limit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	struct xt_rateinfo *r =
-		((const struct xt_rateinfo *)par->matchinfo)->master;
+	const struct xt_rateinfo *r = par->matchinfo;
+	struct xt_limit_priv *priv = r->master;
 	unsigned long now = jiffies;
 
 	spin_lock_bh(&limit_lock);
-	r->credit += (now - xchg(&r->prev, now)) * CREDITS_PER_JIFFY;
-	if (r->credit > r->credit_cap)
-		r->credit = r->credit_cap;
+	priv->credit += (now - xchg(&priv->prev, now)) * CREDITS_PER_JIFFY;
+	if (priv->credit > r->credit_cap)
+		priv->credit = r->credit_cap;
 
-	if (r->credit >= r->cost) {
+	if (priv->credit >= r->cost) {
 		/* We're not limited. */
-		r->credit -= r->cost;
+		priv->credit -= r->cost;
 		spin_unlock_bh(&limit_lock);
 		return true;
 	}
@@ -92,29 +99,41 @@ user2credits(u_int32_t user)
 	return (user * HZ * CREDITS_PER_JIFFY) / XT_LIMIT_SCALE;
 }
 
-static bool limit_mt_check(const struct xt_mtchk_param *par)
+static int limit_mt_check(const struct xt_mtchk_param *par)
 {
 	struct xt_rateinfo *r = par->matchinfo;
+	struct xt_limit_priv *priv;
 
 	/* Check for overflow. */
 	if (r->burst == 0
 	    || user2credits(r->avg * r->burst) < user2credits(r->avg)) {
-		printk("Overflow in xt_limit, try lower: %u/%u\n",
-		       r->avg, r->burst);
-		return false;
+		pr_info("Overflow, try lower: %u/%u\n",
+			r->avg, r->burst);
+		return -ERANGE;
 	}
 
-	/* For SMP, we only want to use one set of counters. */
-	r->master = r;
+	priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+	if (priv == NULL)
+		return -ENOMEM;
+
+	/* For SMP, we only want to use one set of state. */
+	r->master = priv;
 	if (r->cost == 0) {
 		/* User avg in seconds * XT_LIMIT_SCALE: convert to jiffies *
 		   128. */
-		r->prev = jiffies;
-		r->credit = user2credits(r->avg * r->burst);	 /* Credits full. */
+		priv->prev = jiffies;
+		priv->credit = user2credits(r->avg * r->burst); /* Credits full. */
 		r->credit_cap = user2credits(r->avg * r->burst); /* Credits full. */
 		r->cost = user2credits(r->avg);
 	}
-	return true;
+	return 0;
+}
+
+static void limit_mt_destroy(const struct xt_mtdtor_param *par)
+{
+	const struct xt_rateinfo *info = par->matchinfo;
+
+	kfree(info->master);
 }
 
 #ifdef CONFIG_COMPAT
@@ -131,7 +150,7 @@ struct compat_xt_rateinfo {
 
 /* To keep the full "prev" timestamp, the upper 32 bits are stored in the
  * master pointer, which does not need to be preserved. */
-static void limit_mt_compat_from_user(void *dst, void *src)
+static void limit_mt_compat_from_user(void *dst, const void *src)
 {
 	const struct compat_xt_rateinfo *cm = src;
 	struct xt_rateinfo m = {
@@ -145,7 +164,7 @@ static void limit_mt_compat_from_user(void *dst, void *src)
 	memcpy(dst, &m, sizeof(m));
 }
 
-static int limit_mt_compat_to_user(void __user *dst, void *src)
+static int limit_mt_compat_to_user(void __user *dst, const void *src)
 {
 	const struct xt_rateinfo *m = src;
 	struct compat_xt_rateinfo cm = {
@@ -167,6 +186,7 @@ static struct xt_match limit_mt_reg __read_mostly = {
 	.family           = NFPROTO_UNSPEC,
 	.match            = limit_mt,
 	.checkentry       = limit_mt_check,
+	.destroy          = limit_mt_destroy,
 	.matchsize        = sizeof(struct xt_rateinfo),
 #ifdef CONFIG_COMPAT
 	.compatsize       = sizeof(struct compat_xt_rateinfo),

@@ -12,9 +12,14 @@
 #include <linux/spinlock.h>
 #include <linux/skbuff.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 
 #include <linux/netfilter/xt_statistic.h>
 #include <linux/netfilter/x_tables.h>
+
+struct xt_statistic_priv {
+	uint32_t count;
+};
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Patrick McHardy <kaber@trash.net>");
@@ -25,9 +30,9 @@ MODULE_ALIAS("ip6t_statistic");
 static DEFINE_SPINLOCK(nth_lock);
 
 static bool
-statistic_mt(const struct sk_buff *skb, const struct xt_match_param *par)
+statistic_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	struct xt_statistic_info *info = (void *)par->matchinfo;
+	const struct xt_statistic_info *info = par->matchinfo;
 	bool ret = info->flags & XT_STATISTIC_INVERT;
 
 	switch (info->mode) {
@@ -36,10 +41,9 @@ statistic_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 			ret = !ret;
 		break;
 	case XT_STATISTIC_MODE_NTH:
-		info = info->master;
 		spin_lock_bh(&nth_lock);
-		if (info->u.nth.count++ == info->u.nth.every) {
-			info->u.nth.count = 0;
+		if (info->master->count++ == info->u.nth.every) {
+			info->master->count = 0;
 			ret = !ret;
 		}
 		spin_unlock_bh(&nth_lock);
@@ -49,15 +53,27 @@ statistic_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 	return ret;
 }
 
-static bool statistic_mt_check(const struct xt_mtchk_param *par)
+static int statistic_mt_check(const struct xt_mtchk_param *par)
 {
 	struct xt_statistic_info *info = par->matchinfo;
 
 	if (info->mode > XT_STATISTIC_MODE_MAX ||
 	    info->flags & ~XT_STATISTIC_MASK)
-		return false;
-	info->master = info;
-	return true;
+		return -EINVAL;
+
+	info->master = kzalloc(sizeof(*info->master), GFP_KERNEL);
+	if (info->master == NULL)
+		return -ENOMEM;
+	info->master->count = info->u.nth.count;
+
+	return 0;
+}
+
+static void statistic_mt_destroy(const struct xt_mtdtor_param *par)
+{
+	const struct xt_statistic_info *info = par->matchinfo;
+
+	kfree(info->master);
 }
 
 static struct xt_match xt_statistic_mt_reg __read_mostly = {
@@ -66,6 +82,7 @@ static struct xt_match xt_statistic_mt_reg __read_mostly = {
 	.family     = NFPROTO_UNSPEC,
 	.match      = statistic_mt,
 	.checkentry = statistic_mt_check,
+	.destroy    = statistic_mt_destroy,
 	.matchsize  = sizeof(struct xt_statistic_info),
 	.me         = THIS_MODULE,
 };

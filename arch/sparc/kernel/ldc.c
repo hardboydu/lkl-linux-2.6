@@ -14,6 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/init.h>
+#include <linux/bitmap.h>
 
 #include <asm/hypervisor.h>
 #include <asm/iommu.h>
@@ -1183,8 +1184,7 @@ out_free_txq:
 	free_queue(lp->tx_num_entries, lp->tx_base);
 
 out_free_mssbuf:
-	if (mssbuf)
-		kfree(mssbuf);
+	kfree(mssbuf);
 
 out_free_iommu:
 	ldc_iommu_release(lp);
@@ -1217,8 +1217,7 @@ void ldc_free(struct ldc_channel *lp)
 
 	hlist_del(&lp->list);
 
-	if (lp->mssbuf)
-		kfree(lp->mssbuf);
+	kfree(lp->mssbuf);
 
 	ldc_iommu_release(lp);
 
@@ -1244,13 +1243,13 @@ int ldc_bind(struct ldc_channel *lp, const char *name)
 	snprintf(lp->tx_irq_name, LDC_IRQ_NAME_MAX, "%s TX", name);
 
 	err = request_irq(lp->cfg.rx_irq, ldc_rx,
-			  IRQF_SAMPLE_RANDOM | IRQF_SHARED,
+			  IRQF_SAMPLE_RANDOM | IRQF_DISABLED,
 			  lp->rx_irq_name, lp);
 	if (err)
 		return err;
 
 	err = request_irq(lp->cfg.tx_irq, ldc_tx,
-			  IRQF_SAMPLE_RANDOM | IRQF_SHARED,
+			  IRQF_SAMPLE_RANDOM | IRQF_DISABLED,
 			  lp->tx_irq_name, lp);
 	if (err) {
 		free_irq(lp->cfg.rx_irq, lp);
@@ -1877,7 +1876,7 @@ EXPORT_SYMBOL(ldc_read);
 static long arena_alloc(struct ldc_iommu *iommu, unsigned long npages)
 {
 	struct iommu_arena *arena = &iommu->arena;
-	unsigned long n, i, start, end, limit;
+	unsigned long n, start, end, limit;
 	int pass;
 
 	limit = arena->limit;
@@ -1885,7 +1884,7 @@ static long arena_alloc(struct ldc_iommu *iommu, unsigned long npages)
 	pass = 0;
 
 again:
-	n = find_next_zero_bit(arena->map, limit, start);
+	n = bitmap_find_next_zero_area(arena->map, limit, start, npages, 0);
 	end = n + npages;
 	if (unlikely(end >= limit)) {
 		if (likely(pass < 1)) {
@@ -1898,16 +1897,7 @@ again:
 			return -1;
 		}
 	}
-
-	for (i = n; i < end; i++) {
-		if (test_bit(i, arena->map)) {
-			start = i + 1;
-			goto again;
-		}
-	}
-
-	for (i = n; i < end; i++)
-		__set_bit(i, arena->map);
+	bitmap_set(arena->map, n, npages);
 
 	arena->hint = end;
 

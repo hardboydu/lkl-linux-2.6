@@ -70,6 +70,10 @@ static int hfs_releasepage(struct page *page, gfp_t mask)
 		BUG();
 		return 0;
 	}
+
+	if (!tree)
+		return 0;
+
 	if (tree->node_size >= PAGE_CACHE_SIZE) {
 		nidx = page->index >> (tree->node_size_shift - PAGE_CACHE_SHIFT);
 		spin_lock(&tree->hash_lock);
@@ -377,7 +381,7 @@ void hfs_inode_write_fork(struct inode *inode, struct hfs_extent *ext,
 					 HFS_SB(inode->i_sb)->alloc_blksz);
 }
 
-int hfs_write_inode(struct inode *inode, int unused)
+int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct inode *main_inode = inode;
 	struct hfs_find_data fd;

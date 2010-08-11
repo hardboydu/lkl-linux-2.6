@@ -40,7 +40,6 @@ typedef struct xfs_inode_log_format {
 	__int32_t		ilf_boffset;	/* off of inode in buffer */
 } xfs_inode_log_format_t;
 
-#ifndef HAVE_FORMAT32
 typedef struct xfs_inode_log_format_32 {
 	__uint16_t		ilf_type;	/* inode log item type */
 	__uint16_t		ilf_size;	/* size of this item */
@@ -56,7 +55,6 @@ typedef struct xfs_inode_log_format_32 {
 	__int32_t		ilf_len;	/* len of inode buffer */
 	__int32_t		ilf_boffset;	/* off of inode in buffer */
 } __attribute__((packed)) xfs_inode_log_format_32_t;
-#endif
 
 typedef struct xfs_inode_log_format_64 {
 	__uint16_t		ilf_type;	/* inode log item type */
@@ -129,7 +127,7 @@ static inline int xfs_ilog_fdata(int w)
 #ifdef __KERNEL__
 
 struct xfs_buf;
-struct xfs_bmbt_rec_64;
+struct xfs_bmbt_rec;
 struct xfs_inode;
 struct xfs_mount;
 
@@ -139,21 +137,13 @@ typedef struct xfs_inode_log_item {
 	struct xfs_inode	*ili_inode;	   /* inode ptr */
 	xfs_lsn_t		ili_flush_lsn;	   /* lsn at last flush */
 	xfs_lsn_t		ili_last_lsn;	   /* lsn at last transaction */
-	unsigned short		ili_ilock_recur;   /* lock recursion count */
-	unsigned short		ili_iolock_recur;  /* lock recursion count */
 	unsigned short		ili_flags;	   /* misc flags */
 	unsigned short		ili_logged;	   /* flushed logged data */
 	unsigned int		ili_last_fields;   /* fields when flushed */
-	struct xfs_bmbt_rec_64	*ili_extents_buf;  /* array of logged
+	struct xfs_bmbt_rec	*ili_extents_buf;  /* array of logged
 						      data exts */
-	struct xfs_bmbt_rec_64	*ili_aextents_buf; /* array of logged
+	struct xfs_bmbt_rec	*ili_aextents_buf; /* array of logged
 						      attr exts */
-	unsigned int            ili_pushbuf_flag;  /* one bit used in push_ail */
-
-#ifdef DEBUG
-	uint64_t                ili_push_owner;    /* one who sets pushbuf_flag
-						      above gets to push the buf */
-#endif
 #ifdef XFS_TRANS_DEBUG
 	int			ili_root_size;
 	char			*ili_orig_root;

@@ -13,7 +13,7 @@
 
 #include <linux/crash_dump.h>
 #include <linux/bootmem.h>
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 #include <asm/code-patching.h>
 #include <asm/kdump.h>
 #include <asm/prom.h>
@@ -33,7 +33,7 @@ unsigned long long elfcorehdr_addr = ELFCORE_ADDR_MAX;
 #ifndef CONFIG_RELOCATABLE
 void __init reserve_kdump_trampoline(void)
 {
-	lmb_reserve(0, KDUMP_RESERVE_LIMIT);
+	memblock_reserve(0, KDUMP_RESERVE_LIMIT);
 }
 
 static void __init create_trampoline(unsigned long addr)
@@ -48,7 +48,7 @@ static void __init create_trampoline(unsigned long addr)
 	 * branch to "addr" we jump to ("addr" + 32 MB). Although it requires
 	 * two instructions it doesn't require any registers.
 	 */
-	patch_instruction(p, PPC_NOP_INSTR);
+	patch_instruction(p, PPC_INST_NOP);
 	patch_branch(++p, addr + PHYSICAL_START, 0);
 }
 

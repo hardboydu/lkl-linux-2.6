@@ -23,6 +23,7 @@
 
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/ioctl.h>
 #include <asm/uaccess.h>
 #include <linux/i2c.h>
@@ -252,11 +253,6 @@ static int wm8739_log_status(struct v4l2_subdev *sd)
 	return 0;
 }
 
-static int wm8739_command(struct i2c_client *client, unsigned cmd, void *arg)
-{
-	return v4l2_subdev_command(i2c_get_clientdata(client), cmd, arg);
-}
-
 /* ----------------------------------------------------------------------- */
 
 static const struct v4l2_subdev_core_ops wm8739_core_ops = {
@@ -343,8 +339,6 @@ MODULE_DEVICE_TABLE(i2c, wm8739_id);
 
 static struct v4l2_i2c_driver_data v4l2_i2c_data = {
 	.name = "wm8739",
-	.driverid = I2C_DRIVERID_WM8739,
-	.command = wm8739_command,
 	.probe = wm8739_probe,
 	.remove = wm8739_remove,
 	.id_table = wm8739_id,

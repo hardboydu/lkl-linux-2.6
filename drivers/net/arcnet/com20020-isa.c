@@ -30,7 +30,6 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -150,6 +149,8 @@ static int __init com20020_init(void)
 
 	if (node && node != 0xff)
 		dev->dev_addr[0] = node;
+
+	dev->netdev_ops = &com20020_netdev_ops;
 
 	lp = netdev_priv(dev);
 	lp->backplane = backplane;

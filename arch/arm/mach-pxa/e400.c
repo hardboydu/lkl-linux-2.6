@@ -22,9 +22,7 @@
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
 
-#include <mach/mfp-pxa25x.h>
-#include <mach/pxa-regs.h>
-#include <mach/hardware.h>
+#include <mach/pxa25x.h>
 #include <mach/eseries-gpio.h>
 #include <mach/pxafb.h>
 #include <mach/udc.h>
@@ -132,6 +130,9 @@ static struct platform_device *devices[] __initdata = {
 static void __init e400_init(void)
 {
 	pxa2xx_mfp_config(ARRAY_AND_SIZE(e400_pin_config));
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
 	/* Fixme - e400 may have a switched clock */
 	eseries_register_clks();
 	eseries_get_tmio_gpios();

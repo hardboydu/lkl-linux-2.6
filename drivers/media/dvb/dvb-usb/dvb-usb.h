@@ -81,9 +81,24 @@ struct dvb_usb_device_description {
  * @event: the input event assigned to key identified by custom and data
  */
 struct dvb_usb_rc_key {
-	u8 custom,data;
+	u16 scan;
 	u32 event;
 };
+
+static inline u8 rc5_custom(struct dvb_usb_rc_key *key)
+{
+	return (key->scan >> 8) & 0xff;
+}
+
+static inline u8 rc5_data(struct dvb_usb_rc_key *key)
+{
+	return key->scan & 0xff;
+}
+
+static inline u8 rc5_scan(struct dvb_usb_rc_key *key)
+{
+	return key->scan & 0xffff;
+}
 
 struct dvb_usb_device;
 struct dvb_usb_adapter;
@@ -147,6 +162,9 @@ struct dvb_usb_adapter_properties {
 	struct usb_data_stream_properties stream;
 
 	int size_of_priv;
+
+	int (*fe_ioctl_override) (struct dvb_frontend *,
+				  unsigned int, void *, unsigned int);
 };
 
 /**
@@ -180,6 +198,12 @@ struct dvb_usb_adapter_properties {
  *  is non-zero, one can use dvb_usb_generic_rw and dvb_usb_generic_write-
  *  helper functions.
  *
+ * @generic_bulk_ctrl_endpoint_response: some DVB USB devices use a separate
+ *  endpoint for responses to control messages sent with bulk transfers via
+ *  the generic_bulk_ctrl_endpoint. When this is non-zero, this will be used
+ *  instead of the generic_bulk_ctrl_endpoint when reading usb responses in
+ *  the dvb_usb_generic_rw helper function.
+ *
  * @num_device_descs: number of struct dvb_usb_device_description in @devices
  * @devices: array of struct dvb_usb_device_description compatibles with these
  *  properties.
@@ -196,7 +220,7 @@ struct dvb_usb_device_properties {
 #define CYPRESS_FX2     3
 	int        usb_ctrl;
 	int        (*download_firmware) (struct usb_device *, const struct firmware *);
-	const char firmware[FIRMWARE_NAME_MAX];
+	const char *firmware;
 	int        no_reconnect;
 
 	int size_of_priv;
@@ -221,9 +245,10 @@ struct dvb_usb_device_properties {
 	struct i2c_algorithm *i2c_algo;
 
 	int generic_bulk_ctrl_endpoint;
+	int generic_bulk_ctrl_endpoint_response;
 
 	int num_device_descs;
-	struct dvb_usb_device_description devices[9];
+	struct dvb_usb_device_description devices[12];
 };
 
 /**

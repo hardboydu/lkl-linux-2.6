@@ -19,8 +19,8 @@
 #include <asm/cio.h>
 #include <asm/chpid.h>
 #include <asm/chsc.h>
+#include <asm/crw.h>
 
-#include "../s390mach.h"
 #include "css.h"
 #include "cio.h"
 #include "cio_debug.h"
@@ -29,6 +29,7 @@
 #include "chsc.h"
 
 static void *sei_page;
+static DEFINE_SPINLOCK(sda_lock);
 
 /**
  * chsc_error_from_response() - convert a chsc response to an error
@@ -549,8 +550,7 @@ cleanup:
 	return ret;
 }
 
-static int
-__chsc_do_secm(struct channel_subsystem *css, int enable, void *page)
+int __chsc_do_secm(struct channel_subsystem *css, int enable, void *page)
 {
 	struct {
 		struct chsc_header request;
@@ -575,7 +575,7 @@ __chsc_do_secm(struct channel_subsystem *css, int enable, void *page)
 	secm_area->request.length = 0x0050;
 	secm_area->request.code = 0x0016;
 
-	secm_area->key = PAGE_DEFAULT_KEY;
+	secm_area->key = PAGE_DEFAULT_KEY >> 4;
 	secm_area->cub_addr1 = (u64)(unsigned long)css->cub_addr1;
 	secm_area->cub_addr2 = (u64)(unsigned long)css->cub_addr2;
 
@@ -589,6 +589,7 @@ __chsc_do_secm(struct channel_subsystem *css, int enable, void *page)
 	case 0x0102:
 	case 0x0103:
 		ret = -EINVAL;
+		break;
 	default:
 		ret = chsc_error_from_response(secm_area->response.code);
 	}
@@ -712,7 +713,7 @@ int chsc_determine_base_channel_path_desc(struct chp_id chpid,
 	ret = chsc_determine_channel_path_desc(chpid, 0, 0, 0, 0, chsc_resp);
 	if (ret)
 		goto out_free;
-	memcpy(desc, &chsc_resp->data, chsc_resp->length);
+	memcpy(desc, &chsc_resp->data, sizeof(*desc));
 out_free:
 	kfree(chsc_resp);
 	return ret;
@@ -820,7 +821,7 @@ int __init chsc_alloc_sei_area(void)
 			      "chsc machine checks!\n");
 		return -ENOMEM;
 	}
-	ret = s390_register_crw_handler(CRW_RSC_CSS, chsc_process_crw);
+	ret = crw_register_handler(CRW_RSC_CSS, chsc_process_crw);
 	if (ret)
 		kfree(sei_page);
 	return ret;
@@ -828,15 +829,14 @@ int __init chsc_alloc_sei_area(void)
 
 void __init chsc_free_sei_area(void)
 {
-	s390_unregister_crw_handler(CRW_RSC_CSS);
+	crw_unregister_handler(CRW_RSC_CSS);
 	kfree(sei_page);
 }
 
-int __init
-chsc_enable_facility(int operation_code)
+int chsc_enable_facility(int operation_code)
 {
 	int ret;
-	struct {
+	static struct {
 		struct chsc_header request;
 		u8 reserved1:4;
 		u8 format:4;
@@ -849,33 +849,32 @@ chsc_enable_facility(int operation_code)
 		u32 reserved5:4;
 		u32 format2:4;
 		u32 reserved6:24;
-	} __attribute__ ((packed)) *sda_area;
+	} __attribute__ ((packed, aligned(4096))) sda_area;
 
-	sda_area = (void *)get_zeroed_page(GFP_KERNEL|GFP_DMA);
-	if (!sda_area)
-		return -ENOMEM;
-	sda_area->request.length = 0x0400;
-	sda_area->request.code = 0x0031;
-	sda_area->operation_code = operation_code;
+	spin_lock(&sda_lock);
+	memset(&sda_area, 0, sizeof(sda_area));
+	sda_area.request.length = 0x0400;
+	sda_area.request.code = 0x0031;
+	sda_area.operation_code = operation_code;
 
-	ret = chsc(sda_area);
+	ret = chsc(&sda_area);
 	if (ret > 0) {
 		ret = (ret == 3) ? -ENODEV : -EBUSY;
 		goto out;
 	}
 
-	switch (sda_area->response.code) {
+	switch (sda_area.response.code) {
 	case 0x0101:
 		ret = -EOPNOTSUPP;
 		break;
 	default:
-		ret = chsc_error_from_response(sda_area->response.code);
+		ret = chsc_error_from_response(sda_area.response.code);
 	}
 	if (ret != 0)
 		CIO_CRW_EVENT(2, "chsc: sda (oc=%x) failed (rc=%04x)\n",
-			      operation_code, sda_area->response.code);
+			      operation_code, sda_area.response.code);
  out:
-	free_page((unsigned long)sda_area);
+	spin_unlock(&sda_lock);
 	return ret;
 }
 

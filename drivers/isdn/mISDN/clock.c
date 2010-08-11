@@ -33,6 +33,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
@@ -41,11 +42,11 @@
 
 static u_int *debug;
 static LIST_HEAD(iclock_list);
-DEFINE_RWLOCK(iclock_lock);
-u16	iclock_count;		/* counter of last clock */
-struct	timeval iclock_tv;	/* time stamp of last clock */
-int	iclock_tv_valid;	/* already received one timestamp */
-struct	mISDNclock *iclock_current;
+static DEFINE_RWLOCK(iclock_lock);
+static u16 iclock_count;		/* counter of last clock */
+static struct timeval iclock_tv;	/* time stamp of last clock */
+static int iclock_tv_valid;		/* already received one timestamp */
+static struct mISDNclock *iclock_current;
 
 void
 mISDN_init_clock(u_int *dp)

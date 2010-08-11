@@ -6,12 +6,12 @@
  */
 
 #include <linux/i2c.h>
+#include <linux/slab.h>
 #include <linux/videodev2.h>
 #include <linux/delay.h>
-#include <linux/video_decoder.h>
 #include <media/v4l2-device.h>
 #include <media/tvp5150.h>
-#include <media/v4l2-i2c-drv-legacy.h>
+#include <media/v4l2-i2c-drv.h>
 #include <media/v4l2-chip-ident.h>
 
 #include "tvp5150_reg.h"
@@ -20,14 +20,6 @@ MODULE_DESCRIPTION("Texas Instruments TVP5150A video decoder driver");
 MODULE_AUTHOR("Mauro Carvalho Chehab");
 MODULE_LICENSE("GPL");
 
-/* standard i2c insmod options */
-static unsigned short normal_i2c[] = {
-	0xb8 >> 1,
-	0xba >> 1,
-	I2C_CLIENT_END
-};
-
-I2C_CLIENT_INSMOD;
 
 static int debug;
 module_param(debug, int, 0);
@@ -78,7 +70,8 @@ struct tvp5150 {
 	struct v4l2_subdev sd;
 
 	v4l2_std_id norm;	/* Current set standard */
-	struct v4l2_routing route;
+	u32 input;
+	u32 output;
 	int enable;
 	int bright;
 	int contrast;
@@ -289,10 +282,10 @@ static inline void tvp5150_selmux(struct v4l2_subdev *sd)
 	int input = 0;
 	unsigned char val;
 
-	if ((decoder->route.output & TVP5150_BLACK_SCREEN) || !decoder->enable)
+	if ((decoder->output & TVP5150_BLACK_SCREEN) || !decoder->enable)
 		input = 8;
 
-	switch (decoder->route.input) {
+	switch (decoder->input) {
 	case TVP5150_COMPOSITE1:
 		input |= 2;
 		/* fall through */
@@ -308,8 +301,8 @@ static inline void tvp5150_selmux(struct v4l2_subdev *sd)
 
 	v4l2_dbg(1, debug, sd, "Selecting video route: route input=%i, output=%i "
 			"=> tvp5150 input=%i, opmode=%i\n",
-			decoder->route.input,decoder->route.output,
-			input, opmode );
+			decoder->input, decoder->output,
+			input, opmode);
 
 	tvp5150_write(sd, TVP5150_OP_MODE_CTL, opmode);
 	tvp5150_write(sd, TVP5150_VD_IN_SRC_SEL_1, input);
@@ -318,7 +311,7 @@ static inline void tvp5150_selmux(struct v4l2_subdev *sd)
 	 * For Composite and TV, it should be the reverse
 	 */
 	val = tvp5150_read(sd, TVP5150_MISC_CTL);
-	if (decoder->route.input == TVP5150_SVIDEO)
+	if (decoder->input == TVP5150_SVIDEO)
 		val = (val & ~0x40) | 0x10;
 	else
 		val = (val & ~0x10) | 0x40;
@@ -632,7 +625,7 @@ static int tvp5150_g_sliced_vbi_cap(struct v4l2_subdev *sd,
 	const struct i2c_vbi_ram_value *regs = vbi_ram_default;
 	int line;
 
-	v4l2_dbg(1, debug, sd, "VIDIOC_G_SLICED_VBI_CAP\n");
+	v4l2_dbg(1, debug, sd, "g_sliced_vbi_cap\n");
 	memset(cap, 0, sizeof *cap);
 
 	while (regs->reg != (u16)-1 ) {
@@ -831,7 +824,7 @@ static int tvp5150_reset(struct v4l2_subdev *sd, u32 val)
 
 static int tvp5150_g_ctrl(struct v4l2_subdev *sd, struct v4l2_control *ctrl)
 {
-	v4l2_dbg(1, debug, sd, "VIDIOC_G_CTRL called\n");
+	v4l2_dbg(1, debug, sd, "g_ctrl called\n");
 
 	switch (ctrl->id) {
 	case V4L2_CID_BRIGHTNESS:
@@ -861,7 +854,7 @@ static int tvp5150_s_ctrl(struct v4l2_subdev *sd, struct v4l2_control *ctrl)
 		if (ctrl->value < tvp5150_qctrl[i].minimum ||
 		    ctrl->value > tvp5150_qctrl[i].maximum)
 			return -ERANGE;
-		v4l2_dbg(1, debug, sd, "VIDIOC_S_CTRL: id=%d, value=%d\n",
+		v4l2_dbg(1, debug, sd, "s_ctrl: id=%d, value=%d\n",
 					ctrl->id, ctrl->value);
 		break;
 	}
@@ -887,38 +880,37 @@ static int tvp5150_s_ctrl(struct v4l2_subdev *sd, struct v4l2_control *ctrl)
 			I2C Command
  ****************************************************************************/
 
-static int tvp5150_s_routing(struct v4l2_subdev *sd, const struct v4l2_routing *route)
+static int tvp5150_s_routing(struct v4l2_subdev *sd,
+			     u32 input, u32 output, u32 config)
 {
 	struct tvp5150 *decoder = to_tvp5150(sd);
 
-	decoder->route = *route;
+	decoder->input = input;
+	decoder->output = output;
 	tvp5150_selmux(sd);
 	return 0;
 }
 
-static int tvp5150_s_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
+static int tvp5150_s_raw_fmt(struct v4l2_subdev *sd, struct v4l2_vbi_format *fmt)
 {
-	struct v4l2_sliced_vbi_format *svbi;
+	/* this is for capturing 36 raw vbi lines
+	   if there's a way to cut off the beginning 2 vbi lines
+	   with the tvp5150 then the vbi line count could be lowered
+	   to 17 lines/field again, although I couldn't find a register
+	   which could do that cropping */
+	if (fmt->sample_format == V4L2_PIX_FMT_GREY)
+		tvp5150_write(sd, TVP5150_LUMA_PROC_CTL_1, 0x70);
+	if (fmt->count[0] == 18 && fmt->count[1] == 18) {
+		tvp5150_write(sd, TVP5150_VERT_BLANKING_START, 0x00);
+		tvp5150_write(sd, TVP5150_VERT_BLANKING_STOP, 0x01);
+	}
+	return 0;
+}
+
+static int tvp5150_s_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_format *svbi)
+{
 	int i;
 
-	/* raw vbi */
-	if (fmt->type == V4L2_BUF_TYPE_VBI_CAPTURE) {
-		/* this is for capturing 36 raw vbi lines
-		   if there's a way to cut off the beginning 2 vbi lines
-		   with the tvp5150 then the vbi line count could be lowered
-		   to 17 lines/field again, although I couldn't find a register
-		   which could do that cropping */
-		if (fmt->fmt.vbi.sample_format == V4L2_PIX_FMT_GREY)
-			tvp5150_write(sd, TVP5150_LUMA_PROC_CTL_1, 0x70);
-		if (fmt->fmt.vbi.count[0] == 18 && fmt->fmt.vbi.count[1] == 18) {
-			tvp5150_write(sd, TVP5150_VERT_BLANKING_START, 0x00);
-			tvp5150_write(sd, TVP5150_VERT_BLANKING_STOP, 0x01);
-		}
-		return 0;
-	}
-	if (fmt->type != V4L2_BUF_TYPE_SLICED_VBI_CAPTURE)
-		return -EINVAL;
-	svbi = &fmt->fmt.sliced;
 	if (svbi->service_set != 0) {
 		for (i = 0; i <= 23; i++) {
 			svbi->service_lines[1][i] = 0;
@@ -942,14 +934,10 @@ static int tvp5150_s_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
 	return 0;
 }
 
-static int tvp5150_g_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
+static int tvp5150_g_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_format *svbi)
 {
-	struct v4l2_sliced_vbi_format *svbi;
 	int i, mask = 0;
 
-	if (fmt->type != V4L2_BUF_TYPE_SLICED_VBI_CAPTURE)
-		return -EINVAL;
-	svbi = &fmt->fmt.sliced;
 	memset(svbi, 0, sizeof(*svbi));
 
 	for (i = 0; i <= 23; i++) {
@@ -960,7 +948,6 @@ static int tvp5150_g_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
 	svbi->service_set = mask;
 	return 0;
 }
-
 
 static int tvp5150_g_chip_ident(struct v4l2_subdev *sd,
 				struct v4l2_dbg_chip_ident *chip)
@@ -1015,7 +1002,7 @@ static int tvp5150_queryctrl(struct v4l2_subdev *sd, struct v4l2_queryctrl *qc)
 {
 	int i;
 
-	v4l2_dbg(1, debug, sd, "VIDIOC_QUERYCTRL called\n");
+	v4l2_dbg(1, debug, sd, "queryctrl called\n");
 
 	for (i = 0; i < ARRAY_SIZE(tvp5150_qctrl); i++)
 		if (qc->id && qc->id == tvp5150_qctrl[i].id) {
@@ -1027,11 +1014,6 @@ static int tvp5150_queryctrl(struct v4l2_subdev *sd, struct v4l2_queryctrl *qc)
 	return -EINVAL;
 }
 
-static int tvp5150_command(struct i2c_client *client, unsigned cmd, void *arg)
-{
-	return v4l2_subdev_command(i2c_get_clientdata(client), cmd, arg);
-}
-
 /* ----------------------------------------------------------------------- */
 
 static const struct v4l2_subdev_core_ops tvp5150_core_ops = {
@@ -1039,6 +1021,7 @@ static const struct v4l2_subdev_core_ops tvp5150_core_ops = {
 	.g_ctrl = tvp5150_g_ctrl,
 	.s_ctrl = tvp5150_s_ctrl,
 	.queryctrl = tvp5150_queryctrl,
+	.s_std = tvp5150_s_std,
 	.reset = tvp5150_reset,
 	.g_chip_ident = tvp5150_g_chip_ident,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
@@ -1048,21 +1031,25 @@ static const struct v4l2_subdev_core_ops tvp5150_core_ops = {
 };
 
 static const struct v4l2_subdev_tuner_ops tvp5150_tuner_ops = {
-	.s_std = tvp5150_s_std,
 	.g_tuner = tvp5150_g_tuner,
 };
 
 static const struct v4l2_subdev_video_ops tvp5150_video_ops = {
 	.s_routing = tvp5150_s_routing,
-	.g_fmt = tvp5150_g_fmt,
-	.s_fmt = tvp5150_s_fmt,
+};
+
+static const struct v4l2_subdev_vbi_ops tvp5150_vbi_ops = {
 	.g_sliced_vbi_cap = tvp5150_g_sliced_vbi_cap,
+	.g_sliced_fmt = tvp5150_g_sliced_fmt,
+	.s_sliced_fmt = tvp5150_s_sliced_fmt,
+	.s_raw_fmt = tvp5150_s_raw_fmt,
 };
 
 static const struct v4l2_subdev_ops tvp5150_ops = {
 	.core = &tvp5150_core_ops,
 	.tuner = &tvp5150_tuner_ops,
 	.video = &tvp5150_video_ops,
+	.vbi = &tvp5150_vbi_ops,
 };
 
 
@@ -1091,7 +1078,7 @@ static int tvp5150_probe(struct i2c_client *c,
 		 c->addr << 1, c->adapter->name);
 
 	core->norm = V4L2_STD_ALL;	/* Default is autodetect */
-	core->route.input = TVP5150_COMPOSITE1;
+	core->input = TVP5150_COMPOSITE1;
 	core->enable = 1;
 	core->bright = 128;
 	core->contrast = 128;
@@ -1126,10 +1113,7 @@ MODULE_DEVICE_TABLE(i2c, tvp5150_id);
 
 static struct v4l2_i2c_driver_data v4l2_i2c_data = {
 	.name = "tvp5150",
-	.driverid = I2C_DRIVERID_TVP5150,
-	.command = tvp5150_command,
 	.probe = tvp5150_probe,
 	.remove = tvp5150_remove,
-	.legacy_class = I2C_CLASS_TV_ANALOG | I2C_CLASS_TV_DIGITAL,
 	.id_table = tvp5150_id,
 };
