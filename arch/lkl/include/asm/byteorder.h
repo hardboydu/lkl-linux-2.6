@@ -1,6 +1,7 @@
 #ifndef _ASM_LKL_BYTEORDER_H
 #define _ASM_LKL_BYTEORDER_H
 
+#include "target.h"
 
 #if defined(LITTLE_ENDIAN)
 #  include <linux/byteorder/little_endian.h>
