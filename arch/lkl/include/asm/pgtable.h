@@ -2,7 +2,6 @@
 #define _ASM_LKL_PGTABLE_H
 
 
-#include <asm-generic/4level-fixup.h>
 
 /*
  * (C) Copyright 2000-2002, Greg Ungerer <gerg@snapgear.com>
@@ -12,6 +11,8 @@
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/io.h>
+#include <asm-generic/4level-fixup.h>
+#include <asm-generic/pgtable.h>
 
 /*
  * Trivial page table functions.
