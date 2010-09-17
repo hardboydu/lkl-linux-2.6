@@ -6,13 +6,6 @@ typedef struct {
 	unsigned long		end_brk;
 } mm_context_t;
 
-struct mm_struct;
-
-#define HAVE_ARCH_PICK_MMAP_LAYOUT
-static inline void arch_pick_mmap_layout(struct mm_struct *mm)
-{
-}
-
 /*
  * We don't have strict user/kernel spaces. 
  */
@@ -23,4 +16,4 @@ static inline void arch_pick_mmap_layout(struct mm_struct *mm)
  */
 #define TASK_UNMAPPED_BASE	0xdead0020
 
-#endif
+#endif /* _ASM_LKL_MMU_H */
