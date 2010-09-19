@@ -21,7 +21,7 @@ void __devinit calibrate_delay(void)
 {
 }
 
-static cycle_t clock_read(void)
+static cycle_t clock_read(struct clocksource *cs)
 {
         return lkl_nops->time();
 }
