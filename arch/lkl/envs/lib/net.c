@@ -3,11 +3,15 @@
 /* uio.h is broken */
 typedef __kernel_size_t size_t;
 
+#include <linux/socket.h>
+#include <sys/socket.h>
 #include <linux/in.h>
 #include <linux/if.h>
 #include <linux/errno.h>
 #include <linux/route.h>
 #include <asm/byteorder.h>
+#include <linux/sockios.h>
+#include <string.h>
 
 
 
