@@ -22,7 +22,7 @@ static void complete_request(struct lkl_disk_cs *cs)
 {
 	struct request *req=(struct request*)cs->linux_cookie;
 
-	__blk_end_request(req, cs->error, req->current_nr_sectors << 9);
+	__blk_end_request(req, cs->error, blk_rq_bytes(req));
 
 	kfree(cs);
 }
@@ -38,26 +38,32 @@ static irqreturn_t lkl_disk_irq(int irq, void *dev_id)
 
 static void lkl_disk_request(struct request_queue *q)
 {
-	struct request *req;
+	struct request *rq;
 
-	while ((req = elv_next_request(q)) != NULL) {
-		struct lkl_disk_dev *dev = req->rq_disk->private_data;
+	while (1) {
+		struct lkl_disk_dev *dev;
 		struct lkl_disk_cs cs;
 
-		if (! blk_fs_request(req)) {
-			printk (KERN_NOTICE "lkl_disk_request: skip non-fs request\n");
-			__blk_end_request(req, -EIO, req->hard_cur_sectors << 9);
+		rq = blk_fetch_request(q);
+		if (rq == NULL)
+			break;
+
+		if (! blk_fs_request(rq)) {
+			printk (KERN_NOTICE "lkl_disk_request: Skip non-fs request\n");
+			__blk_end_request_all(rq, -EIO);
 			continue;
 		}
 
-		cs.linux_cookie=req;
-		lkl_disk_do_rw(dev->data, req->sector, req->current_nr_sectors,
-			       req->buffer, rq_data_dir(req), &cs);
+		dev = rq->rq_disk->private_data;
+
+		cs.linux_cookie = rq;
+		lkl_disk_do_rw(dev->data, blk_rq_pos(rq), blk_rq_bytes(rq),
+			       rq->buffer, rq_data_dir(rq), &cs);
 		/*
 		 * Async is broken.
 		 */
 		BUG_ON (cs.sync == 0);
-		blk_end_request(req, cs.error ? -EIO : 0, blk_rq_bytes(req));
+		__blk_end_request_all(rq, cs.error ? -EIO : 0);
 	}
 }
 
@@ -93,6 +99,9 @@ int _lkl_disk_del_disk(__kernel_dev_t devt)
 		goto out;
 	}
 
+	if (gd->queue)
+		blk_cleanup_queue(gd->queue);
+
 	del_gendisk(gd);
 
 out:
@@ -113,13 +122,14 @@ __kernel_dev_t _lkl_disk_add_disk(void *data, int sectors)
         dev->data=data;
 
 	spin_lock_init(&dev->lock);
-	
+
         if (!(dev->queue=blk_init_queue(lkl_disk_request, &dev->lock))) {
 		kfree(dev);
 		return 0;
 	}
 
-	blk_queue_hardsect_size(dev->queue, 512);
+	blk_queue_logical_block_size(dev->queue, 512);
+
 	dev->queue->queuedata = dev;
 
 	if (!(dev->gd=alloc_disk(1))) {
@@ -140,7 +150,10 @@ __kernel_dev_t _lkl_disk_add_disk(void *data, int sectors)
 
 	disks++;
 
-	printk("lkldisk: attached %s @ dev=%d:%d\n", dev->gd->disk_name, dev->gd->major, dev->gd->first_minor);
+	printk("lkldisk: attached %s @ dev=%d:%d\n",
+	       dev->gd->disk_name,
+	       dev->gd->major,
+	       dev->gd->first_minor);
 
 	return new_encode_dev(MKDEV(dev->gd->major, dev->gd->first_minor));
 }
