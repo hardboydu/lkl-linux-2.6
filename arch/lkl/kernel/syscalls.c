@@ -180,7 +180,6 @@ static irqreturn_t syscall_irq(int irq, void *dev_id)
 static struct irqaction syscall_irqaction  = {
 	.handler = syscall_irq,
 	.flags = IRQF_DISABLED | IRQF_NOBALANCING,
-	.mask = CPU_MASK_CPU0,
         .dev_id = &syscall_irqaction,
 	.name = "syscall"
 };
