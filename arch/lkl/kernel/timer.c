@@ -78,18 +78,18 @@ static struct clock_event_device clockevent = {
 	.set_mode	= clockevent_set_mode,
 	.set_next_event = clockevent_next_event,
 	.shift		= 0,
-        .mult           = 1,
+	.mult           = 1,
 	.irq		= 0,
-        .max_delta_ns   = 0xffffffff,
-        .min_delta_ns   = 0
+	.max_delta_ns   = 0xffffffff,
+	.min_delta_ns   = 0,
+	.cpumask = cpu_all_mask,
 };
 
 
 static struct irqaction irq0  = {
 	.handler = timer_irq,
 	.flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_TIMER,
-	.mask = CPU_MASK_CPU0,
-        .dev_id = &clockevent,
+	.dev_id = &clockevent,
 	.name = "timer"
 };
 
