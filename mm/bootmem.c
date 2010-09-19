@@ -465,8 +465,8 @@ void __init free_bootmem(unsigned long addr, unsigned long size)
 
 	kmemleak_free_part(__va(addr), size);
 
-	start = PFN_UP(addr);
-	end = PFN_DOWN(addr + size);
+	start = PFN_UP(virt_to_phys((void *) addr));
+	end = PFN_DOWN(virt_to_phys((void *) (addr + size)));
 
 	mark_bootmem(start, end, 0, 0);
 #endif
@@ -518,8 +518,8 @@ int __init reserve_bootmem(unsigned long addr, unsigned long size,
 #else
 	unsigned long start, end;
 
-	start = PFN_DOWN(addr);
-	end = PFN_UP(addr + size);
+	start = PFN_DOWN(virt_to_phys((void *) addr));
+	end = PFN_UP(virt_to_phys((void *) (addr + size)));
 
 	return mark_bootmem(start, end, 1, flags);
 #endif
