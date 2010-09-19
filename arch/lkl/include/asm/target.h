@@ -8,7 +8,6 @@
 
 #ifdef __GNUC__
 
-#define mb() barrier()
 
 #if __LONG_MAX__  == 9223372036854775807L
 #define BITS_PER_LONG 64

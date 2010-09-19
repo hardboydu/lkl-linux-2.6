@@ -88,8 +88,6 @@ static inline unsigned long thread_saved_pc(struct task_struct *tsk)
 	//return ((unsigned long *)tsk->thread.esp)[3];
 }
 
-#define switch_to(prev, next, last) _switch_to(&prev, next, last)
-extern void _switch_to(struct task_struct**, struct task_struct*, struct task_struct*);
 extern asmlinkage int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 #endif

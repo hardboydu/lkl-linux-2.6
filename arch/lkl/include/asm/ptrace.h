@@ -1,6 +1,8 @@
 #ifndef _ASM_LKL_PTRACE_H
 #define _ASM_LKL_PTRACE_H
 
+struct task_struct;
+
 struct pt_regs { 
 	void *irq_data;
 };

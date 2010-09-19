@@ -2,8 +2,8 @@
 #define _ASM_LKL_SYSTEM_H
 
 #include <asm/target.h>
+#include <asm/irqflags.h>
 #include <asm/cache.h>
-#include <asm/smp.h>
 #include <asm/irq.h>
 
 #ifdef __KERNEL__
@@ -26,7 +26,11 @@ extern void local_irq_disable(void);
         (flags == 0);                   \
 })
 
-#endif
-#endif
+#endif /* __ASSEMBLY__ */
 
-#endif
+#include <asm-generic/system.h>
+#include <asm-generic/cmpxchg.h>
+#include <asm-generic/cmpxchg-local.h>
+
+#endif /* __KERNEL__ */
+#endif /* _ASM_LKL_SYSTEM_H */

@@ -1,3 +1,4 @@
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <asm/callbacks.h>
 
@@ -9,6 +10,7 @@ struct __thread_info {
 	struct thread_info ti;
 	void *sched_sem, *thread;
 	int dead;
+	struct task_struct *prev_sched;
 };
 
 static int threads_counter;
@@ -44,6 +46,7 @@ void threads_init(void)
 	struct __thread_info *ti=(struct __thread_info*)&init_thread_union.thread_info;
 
 	ti->dead=0;
+	ti->prev_sched = NULL;
 	BUG_ON((ti->sched_sem=lkl_nops->sem_alloc(0)) == NULL);
 	BUG_ON((threads_counter_lock=lkl_nops->sem_alloc(1)) == NULL);
 }
@@ -67,6 +70,7 @@ struct thread_info* alloc_thread_info(struct task_struct *task)
                 return NULL;
 
         ti->dead=0;
+	ti->prev_sched = NULL;
 	if (!(ti->sched_sem=lkl_nops->sem_alloc(0))) {
 		kfree(ti);
 		return NULL;
@@ -83,15 +87,14 @@ void free_thread_info(struct thread_info *_ti)
 }
 
 struct thread_info *_current_thread_info=&init_thread_union.thread_info;
-static struct task_struct *_last;
 
-void _switch_to(struct task_struct **prev, struct task_struct *next, struct task_struct *last)
+struct task_struct *__switch_to(struct task_struct *prev, struct task_struct *next)
 {
-        struct __thread_info *_prev=(struct __thread_info*)task_thread_info(*prev);
+        struct __thread_info *_prev=(struct __thread_info*)task_thread_info(prev);
         struct __thread_info *_next=(struct __thread_info*)task_thread_info(next);
 
-	_last=last;
 	_current_thread_info=task_thread_info(next);
+	_next->prev_sched = prev;
 
         lkl_nops->sem_up(_next->sched_sem);
         lkl_nops->sem_down(_prev->sched_sem);
@@ -102,8 +105,7 @@ void _switch_to(struct task_struct **prev, struct task_struct *next, struct task
 		threads_counter_dec();
 		lkl_nops->thread_exit(thread);
 	}
-
-	*prev=_last;
+	return prev;
 }
 
 asmlinkage void schedule_tail(struct task_struct *prev);
@@ -124,13 +126,15 @@ static void thread_bootstrap(void *_tba)
 	kfree(tba);
         lkl_nops->sem_down(ti->sched_sem);
 	BUG_ON(ti->dead);
-	schedule_tail(_last);
+	if (ti->prev_sched != NULL)
+		schedule_tail(ti->prev_sched);
 
 	f(arg);
 	do_exit(0);
 }
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+
+int copy_thread(unsigned long clone_flags, unsigned long esp,
 	unsigned long unused,
 	struct task_struct * p, struct pt_regs * regs)
 {

@@ -2,6 +2,7 @@
 #define _ASM_LKL_ATOMIC_H
 
 #include <asm-generic/atomic.h>
+#include <asm/cmpxchg-local.h>
 
 
 static __inline__ int atomic_dec_if_positive(atomic_t *v)
@@ -13,20 +14,6 @@ static __inline__ int atomic_dec_if_positive(atomic_t *v)
 	    v->counter = ret;
 	return ret;
 }
-
-
-#define xchg(ptr, v)	       \
-  ({			       \
-    __typeof__(*(ptr)) ov;     \
-			       \
-    ov = *ptr;		       \
-    *ptr = v;		       \
-    ov;			       \
-  })
-
-
-
-#include <asm-generic/cmpxchg-local.h>
 
 
 /*
