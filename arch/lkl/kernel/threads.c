@@ -8,6 +8,16 @@
  */
 struct __thread_info {
 	struct thread_info ti;
+	/* the code in kernel/fork.c in copy_process() marks a ulong
+	 * right after struct thread_info as a stack end marker, and
+	 * places a magic value there. If we don't reserve space for a
+	 * ulong imediatly after ti, sched_sem will be overwritten
+	 * with that magic value. Note that we can't move struct
+	 * thread_info at the end of __thread_info (so that sched_sem
+	 * & the other members of __thread_info would not be
+	 * overwritten), because LKL's code coverts freely between
+	 * 'struct __thread_info*' and 'struct thread_info*' */
+	unsigned long stack_end_magic_placeholder;
 	void *sched_sem, *thread;
 	int dead;
 	struct task_struct *prev_sched;
