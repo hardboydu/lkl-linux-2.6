@@ -26,9 +26,6 @@
 struct module;
 
 struct clk {
-	struct list_head node;
-	struct module *owner;
-	const char *name;
 	int id;
 	/* Source clock this clk depends on */
 	struct clk *parent;
@@ -62,6 +59,8 @@ struct clk {
 
 int clk_register(struct clk *clk);
 void clk_unregister(struct clk *clk);
+
+unsigned long mxc_decode_pll(unsigned int pll, u32 f_ref);
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_ARCH_MXC_CLOCK_H__ */

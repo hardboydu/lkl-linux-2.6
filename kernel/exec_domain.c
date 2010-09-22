@@ -18,6 +18,7 @@
 #include <linux/syscalls.h>
 #include <linux/sysctl.h>
 #include <linux/types.h>
+#include <linux/fs_struct.h>
 
 
 static void default_handler(int, struct pt_regs *);
@@ -26,7 +27,7 @@ static struct exec_domain *exec_domains = &default_exec_domain;
 static DEFINE_RWLOCK(exec_domains_lock);
 
 
-static u_long ident_map[32] = {
+static unsigned long ident_map[32] = {
 	0,	1,	2,	3,	4,	5,	6,	7,
 	8,	9,	10,	11,	12,	13,	14,	15,
 	16,	17,	18,	19,	20,	21,	22,	23,
@@ -55,10 +56,10 @@ default_handler(int segment, struct pt_regs *regp)
 }
 
 static struct exec_domain *
-lookup_exec_domain(u_long personality)
+lookup_exec_domain(unsigned int personality)
 {
-	struct exec_domain *	ep;
-	u_long			pers = personality(personality);
+	unsigned int pers = personality(personality);
+	struct exec_domain *ep;
 
 	read_lock(&exec_domains_lock);
 	for (ep = exec_domains; ep; ep = ep->next) {
@@ -69,7 +70,7 @@ lookup_exec_domain(u_long personality)
 
 #ifdef CONFIG_MODULES
 	read_unlock(&exec_domains_lock);
-	request_module("personality-%ld", pers);
+	request_module("personality-%d", pers);
 	read_lock(&exec_domains_lock);
 
 	for (ep = exec_domains; ep; ep = ep->next) {
@@ -134,7 +135,7 @@ unregister:
 }
 
 int
-__set_personality(u_long personality)
+__set_personality(unsigned int personality)
 {
 	struct exec_domain	*ep, *oep;
 
@@ -144,28 +145,6 @@ __set_personality(u_long personality)
 		module_put(ep->module);
 		return 0;
 	}
-
-	if (atomic_read(&current->fs->count) != 1) {
-		struct fs_struct *fsp, *ofsp;
-
-		fsp = copy_fs_struct(current->fs);
-		if (fsp == NULL) {
-			module_put(ep->module);
-			return -ENOMEM;
-		}
-
-		task_lock(current);
-		ofsp = current->fs;
-		current->fs = fsp;
-		task_unlock(current);
-
-		put_fs_struct(ofsp);
-	}
-
-	/*
-	 * At that point we are guaranteed to be the sole owner of
-	 * current->fs.
-	 */
 
 	current->personality = personality;
 	oep = current_thread_info()->exec_domain;
@@ -209,9 +188,9 @@ static int __init proc_execdomains_init(void)
 module_init(proc_execdomains_init);
 #endif
 
-SYSCALL_DEFINE1(personality, u_long, personality)
+SYSCALL_DEFINE1(personality, unsigned int, personality)
 {
-	u_long old = current->personality;
+	unsigned int old = current->personality;
 
 	if (personality != 0xffffffff) {
 		set_personality(personality);
@@ -219,7 +198,7 @@ SYSCALL_DEFINE1(personality, u_long, personality)
 			return -EINVAL;
 	}
 
-	return (long)old;
+	return old;
 }
 
 

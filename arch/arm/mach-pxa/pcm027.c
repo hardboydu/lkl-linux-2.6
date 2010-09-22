@@ -29,10 +29,7 @@
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
-#include <mach/hardware.h>
-#include <mach/pxa-regs.h>
-#include <mach/mfp-pxa27x.h>
-#include <mach/pxa2xx-regs.h>
+#include <mach/pxa27x.h>
 #include <mach/pxa2xx_spi.h>
 #include <mach/pcm027.h>
 #include "generic.h"
@@ -229,6 +226,10 @@ static void __init pcm027_init(void)
 	ARB_CNTRL = ARB_CORE_PARK | 0x234;
 
 	pxa2xx_mfp_config(pcm027_pin_config, ARRAY_SIZE(pcm027_pin_config));
+
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 

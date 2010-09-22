@@ -11,6 +11,7 @@
  *
  */
 
+#ifdef CONFIG_OF_DEVICE
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
@@ -30,10 +31,6 @@ extern struct bus_type of_platform_bus_type;
  */
 struct of_platform_driver
 {
-	const char		*name;
-	const struct of_device_id	*match_table;
-	struct module		*owner;
-
 	int	(*probe)(struct of_device* dev,
 			 const struct of_device_id *match);
 	int	(*remove)(struct of_device* dev);
@@ -51,10 +48,21 @@ extern int of_register_driver(struct of_platform_driver *drv,
 			      struct bus_type *bus);
 extern void of_unregister_driver(struct of_platform_driver *drv);
 
+/* Platform drivers register/unregister */
+static inline int of_register_platform_driver(struct of_platform_driver *drv)
+{
+	return of_register_driver(drv, &of_platform_bus_type);
+}
+static inline void of_unregister_platform_driver(struct of_platform_driver *drv)
+{
+	of_unregister_driver(drv);
+}
+
 #include <asm/of_platform.h>
 
 extern struct of_device *of_find_device_by_node(struct device_node *np);
 
 extern int of_bus_type_init(struct bus_type *bus, const char *name);
+#endif /* CONFIG_OF_DEVICE */
 
 #endif	/* _LINUX_OF_PLATFORM_H */

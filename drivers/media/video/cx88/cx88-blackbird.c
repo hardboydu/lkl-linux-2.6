@@ -28,10 +28,12 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/firmware.h>
+#include <linux/smp_lock.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include <media/cx2341x.h>
@@ -746,7 +748,6 @@ static int vidioc_enum_fmt_vid_cap (struct file *file, void  *priv,
 		return -EINVAL;
 
 	strlcpy(f->description, "MPEG", sizeof(f->description));
-	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	f->pixelformat = V4L2_PIX_FMT_MPEG;
 	return 0;
 }
@@ -757,7 +758,6 @@ static int vidioc_g_fmt_vid_cap (struct file *file, void *priv,
 	struct cx8802_fh  *fh   = priv;
 	struct cx8802_dev *dev  = fh->dev;
 
-	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	f->fmt.pix.pixelformat  = V4L2_PIX_FMT_MPEG;
 	f->fmt.pix.bytesperline = 0;
 	f->fmt.pix.sizeimage    = dev->ts_packet_size * dev->ts_packet_count; /* 188 * 4 * 1024; */
@@ -776,7 +776,6 @@ static int vidioc_try_fmt_vid_cap (struct file *file, void *priv,
 	struct cx8802_fh  *fh   = priv;
 	struct cx8802_dev *dev  = fh->dev;
 
-	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	f->fmt.pix.pixelformat  = V4L2_PIX_FMT_MPEG;
 	f->fmt.pix.bytesperline = 0;
 	f->fmt.pix.sizeimage    = dev->ts_packet_size * dev->ts_packet_count; /* 188 * 4 * 1024; */;
@@ -793,7 +792,6 @@ static int vidioc_s_fmt_vid_cap (struct file *file, void *priv,
 	struct cx8802_dev *dev  = fh->dev;
 	struct cx88_core  *core = dev->core;
 
-	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	f->fmt.pix.pixelformat  = V4L2_PIX_FMT_MPEG;
 	f->fmt.pix.bytesperline = 0;
 	f->fmt.pix.sizeimage    = dev->ts_packet_size * dev->ts_packet_count; /* 188 * 4 * 1024; */;
@@ -919,7 +917,7 @@ static int vidioc_log_status (struct file *file, void *priv)
 	snprintf(name, sizeof(name), "%s/2", core->name);
 	printk("%s/2: ============  START LOG STATUS  ============\n",
 		core->name);
-	cx88_call_i2c_clients(core, VIDIOC_LOG_STATUS, NULL);
+	call_all(core, core, log_status);
 	cx2341x_log_status(&dev->params, name);
 	printk("%s/2: =============  END LOG STATUS  =============\n",
 		core->name);
@@ -974,7 +972,7 @@ static int vidioc_g_frequency (struct file *file, void *priv,
 
 	f->type = V4L2_TUNER_ANALOG_TV;
 	f->frequency = core->freq;
-	cx88_call_i2c_clients(core,VIDIOC_G_FREQUENCY,f);
+	call_all(core, tuner, g_frequency, f);
 
 	return 0;
 }
@@ -1051,21 +1049,15 @@ static int vidioc_s_std (struct file *file, void *priv, v4l2_std_id *id)
 
 static int mpeg_open(struct file *file)
 {
-	int minor = video_devdata(file)->minor;
-	struct cx8802_dev *dev = NULL;
+	struct video_device *vdev = video_devdata(file);
+	struct cx8802_dev *dev = video_drvdata(file);
 	struct cx8802_fh *fh;
 	struct cx8802_driver *drv = NULL;
 	int err;
 
-	lock_kernel();
-	dev = cx8802_get_device(minor);
-
 	dprintk( 1, "%s\n", __func__);
 
-	if (dev == NULL) {
-		unlock_kernel();
-		return -ENODEV;
-	}
+	lock_kernel();
 
 	/* Make sure we can acquire the hardware */
 	drv = cx8802_get_driver(dev, CX88_MPEG_BLACKBIRD);
@@ -1084,7 +1076,7 @@ static int mpeg_open(struct file *file)
 		unlock_kernel();
 		return -EINVAL;
 	}
-	dprintk(1,"open minor=%d\n",minor);
+	dprintk(1, "open dev=%s\n", video_device_node_name(vdev));
 
 	/* allocate + initialize per filehandle data */
 	fh = kzalloc(sizeof(*fh),GFP_KERNEL);
@@ -1132,10 +1124,6 @@ static int mpeg_release(struct file *file)
 	kfree(fh);
 
 	/* Make sure we release the hardware */
-	dev = cx8802_get_device(video_devdata(file)->minor);
-	if (dev == NULL)
-		return -ENODEV;
-
 	drv = cx8802_get_driver(dev, CX88_MPEG_BLACKBIRD);
 	if (drv)
 		drv->request_release(drv);
@@ -1223,7 +1211,6 @@ static struct video_device cx8802_mpeg_template = {
 	.name                 = "cx8802",
 	.fops                 = &mpeg_fops,
 	.ioctl_ops 	      = &mpeg_ioctl_ops,
-	.minor                = -1,
 	.tvnorms              = CX88_NORMS,
 	.current_norm         = V4L2_STD_NTSC_M,
 };
@@ -1279,7 +1266,7 @@ static int cx8802_blackbird_advise_release(struct cx8802_driver *drv)
 static void blackbird_unregister_video(struct cx8802_dev *dev)
 {
 	if (dev->mpeg_dev) {
-		if (-1 != dev->mpeg_dev->minor)
+		if (video_is_registered(dev->mpeg_dev))
 			video_unregister_device(dev->mpeg_dev);
 		else
 			video_device_release(dev->mpeg_dev);
@@ -1293,14 +1280,15 @@ static int blackbird_register_video(struct cx8802_dev *dev)
 
 	dev->mpeg_dev = cx88_vdev_init(dev->core,dev->pci,
 				       &cx8802_mpeg_template,"mpeg");
+	video_set_drvdata(dev->mpeg_dev, dev);
 	err = video_register_device(dev->mpeg_dev,VFL_TYPE_GRABBER, -1);
 	if (err < 0) {
 		printk(KERN_INFO "%s/2: can't register mpeg device\n",
 		       dev->core->name);
 		return err;
 	}
-	printk(KERN_INFO "%s/2: registered device video%d [mpeg]\n",
-	       dev->core->name, dev->mpeg_dev->num);
+	printk(KERN_INFO "%s/2: registered device %s [mpeg]\n",
+	       dev->core->name, video_device_node_name(dev->mpeg_dev));
 	return 0;
 }
 
@@ -1374,7 +1362,7 @@ static struct cx8802_driver cx8802_blackbird_driver = {
 	.advise_release	= cx8802_blackbird_advise_release,
 };
 
-static int blackbird_init(void)
+static int __init blackbird_init(void)
 {
 	printk(KERN_INFO "cx2388x blackbird driver version %d.%d.%d loaded\n",
 	       (CX88_VERSION_CODE >> 16) & 0xff,
@@ -1387,7 +1375,7 @@ static int blackbird_init(void)
 	return cx8802_register_driver(&cx8802_blackbird_driver);
 }
 
-static void blackbird_fini(void)
+static void __exit blackbird_fini(void)
 {
 	cx8802_unregister_driver(&cx8802_blackbird_driver);
 }

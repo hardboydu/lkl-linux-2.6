@@ -28,6 +28,7 @@
 #include <linux/mtd/nand_ecc.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/ndfc.h>
+#include <linux/slab.h>
 #include <linux/mtd/mtd.h>
 #include <linux/of_platform.h>
 #include <asm/io.h>
@@ -102,8 +103,8 @@ static int ndfc_calculate_ecc(struct mtd_info *mtd,
 	wmb();
 	ecc = in_be32(ndfc->ndfcbase + NDFC_ECC);
 	/* The NDFC uses Smart Media (SMC) bytes order */
-	ecc_code[0] = p[2];
-	ecc_code[1] = p[1];
+	ecc_code[0] = p[1];
+	ecc_code[1] = p[2];
 	ecc_code[2] = p[3];
 
 	return 0;
@@ -187,7 +188,7 @@ static int ndfc_chip_init(struct ndfc_controller *ndfc,
 		return -ENODEV;
 
 	ndfc->mtd.name = kasprintf(GFP_KERNEL, "%s.%s",
-				   ndfc->ofdev->dev.bus_id, flash_np->name);
+			dev_name(&ndfc->ofdev->dev), flash_np->name);
 	if (!ndfc->mtd.name) {
 		ret = -ENOMEM;
 		goto err;
@@ -238,14 +239,14 @@ static int __devinit ndfc_probe(struct of_device *ofdev,
 	dev_set_drvdata(&ofdev->dev, ndfc);
 
 	/* Read the reg property to get the chip select */
-	reg = of_get_property(ofdev->node, "reg", &len);
+	reg = of_get_property(ofdev->dev.of_node, "reg", &len);
 	if (reg == NULL || len != 12) {
 		dev_err(&ofdev->dev, "unable read reg property (%d)\n", len);
 		return -ENOENT;
 	}
 	ndfc->chip_select = reg[0];
 
-	ndfc->ndfcbase = of_iomap(ofdev->node, 0);
+	ndfc->ndfcbase = of_iomap(ofdev->dev.of_node, 0);
 	if (!ndfc->ndfcbase) {
 		dev_err(&ofdev->dev, "failed to get memory\n");
 		return -EIO;
@@ -254,20 +255,20 @@ static int __devinit ndfc_probe(struct of_device *ofdev,
 	ccr = NDFC_CCR_BS(ndfc->chip_select);
 
 	/* It is ok if ccr does not exist - just default to 0 */
-	reg = of_get_property(ofdev->node, "ccr", NULL);
+	reg = of_get_property(ofdev->dev.of_node, "ccr", NULL);
 	if (reg)
 		ccr |= *reg;
 
 	out_be32(ndfc->ndfcbase + NDFC_CCR, ccr);
 
 	/* Set the bank settings if given */
-	reg = of_get_property(ofdev->node, "bank-settings", NULL);
+	reg = of_get_property(ofdev->dev.of_node, "bank-settings", NULL);
 	if (reg) {
 		int offset = NDFC_BCFG0 + (ndfc->chip_select << 2);
 		out_be32(ndfc->ndfcbase + offset, *reg);
 	}
 
-	err = ndfc_chip_init(ndfc, ofdev->node);
+	err = ndfc_chip_init(ndfc, ofdev->dev.of_node);
 	if (err) {
 		iounmap(ndfc->ndfcbase);
 		return err;
@@ -293,9 +294,10 @@ MODULE_DEVICE_TABLE(of, ndfc_match);
 
 static struct of_platform_driver ndfc_driver = {
 	.driver = {
-		.name	= "ndfc",
+		.name = "ndfc",
+		.owner = THIS_MODULE,
+		.of_match_table = ndfc_match,
 	},
-	.match_table = ndfc_match,
 	.probe = ndfc_probe,
 	.remove = __devexit_p(ndfc_remove),
 };

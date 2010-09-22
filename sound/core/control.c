@@ -50,6 +50,10 @@ static int snd_ctl_open(struct inode *inode, struct file *file)
 	struct snd_ctl_file *ctl;
 	int err;
 
+	err = nonseekable_open(inode, file);
+	if (err < 0)
+		return err;
+
 	card = snd_lookup_minor_data(iminor(inode), SNDRV_DEVICE_TYPE_CONTROL);
 	if (!card) {
 		err = -ENODEV;
@@ -75,7 +79,7 @@ static int snd_ctl_open(struct inode *inode, struct file *file)
 	ctl->card = card;
 	ctl->prefer_pcm_subdevice = -1;
 	ctl->prefer_rawmidi_subdevice = -1;
-	ctl->pid = current->pid;
+	ctl->pid = get_pid(task_pid(current));
 	file->private_data = ctl;
 	write_lock_irqsave(&card->ctl_files_rwlock, flags);
 	list_add_tail(&ctl->list, &card->ctl_files);
@@ -125,6 +129,7 @@ static int snd_ctl_release(struct inode *inode, struct file *file)
 				control->vd[idx].owner = NULL;
 	up_write(&card->controls_rwsem);
 	snd_ctl_empty_read_queue(ctl);
+	put_pid(ctl->pid);
 	kfree(ctl);
 	module_put(card->module);
 	snd_card_file_remove(card, file);
@@ -236,8 +241,9 @@ struct snd_kcontrol *snd_ctl_new1(const struct snd_kcontrol_new *ncontrol,
 	access = ncontrol->access == 0 ? SNDRV_CTL_ELEM_ACCESS_READWRITE :
 		 (ncontrol->access & (SNDRV_CTL_ELEM_ACCESS_READWRITE|
 				      SNDRV_CTL_ELEM_ACCESS_INACTIVE|
-		 		      SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE|
-		 		      SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK));
+				      SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE|
+				      SNDRV_CTL_ELEM_ACCESS_TLV_COMMAND|
+				      SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK));
 	kctl.info = ncontrol->info;
 	kctl.get = ncontrol->get;
 	kctl.put = ncontrol->put;
@@ -414,7 +420,7 @@ int snd_ctl_remove_id(struct snd_card *card, struct snd_ctl_elem_id *id)
 EXPORT_SYMBOL(snd_ctl_remove_id);
 
 /**
- * snd_ctl_remove_unlocked_id - remove the unlocked control of the given id and release it
+ * snd_ctl_remove_user_ctl - remove and release the unlocked user control
  * @file: active control handle
  * @id: the control id to remove
  *
@@ -423,8 +429,8 @@ EXPORT_SYMBOL(snd_ctl_remove_id);
  * 
  * Returns 0 if successful, or a negative error code on failure.
  */
-static int snd_ctl_remove_unlocked_id(struct snd_ctl_file * file,
-				      struct snd_ctl_elem_id *id)
+static int snd_ctl_remove_user_ctl(struct snd_ctl_file * file,
+				   struct snd_ctl_elem_id *id)
 {
 	struct snd_card *card = file->card;
 	struct snd_kcontrol *kctl;
@@ -433,15 +439,23 @@ static int snd_ctl_remove_unlocked_id(struct snd_ctl_file * file,
 	down_write(&card->controls_rwsem);
 	kctl = snd_ctl_find_id(card, id);
 	if (kctl == NULL) {
-		up_write(&card->controls_rwsem);
-		return -ENOENT;
+		ret = -ENOENT;
+		goto error;
+	}
+	if (!(kctl->vd[0].access & SNDRV_CTL_ELEM_ACCESS_USER)) {
+		ret = -EINVAL;
+		goto error;
 	}
 	for (idx = 0; idx < kctl->count; idx++)
 		if (kctl->vd[idx].owner != NULL && kctl->vd[idx].owner != file) {
-			up_write(&card->controls_rwsem);
-			return -EBUSY;
+			ret = -EBUSY;
+			goto error;
 		}
 	ret = snd_ctl_remove(card, kctl);
+	if (ret < 0)
+		goto error;
+	card->user_ctl_count--;
+error:
 	up_write(&card->controls_rwsem);
 	return ret;
 }
@@ -664,7 +678,7 @@ static int snd_ctl_elem_info(struct snd_ctl_file *ctl,
 			info->access |= SNDRV_CTL_ELEM_ACCESS_LOCK;
 			if (vd->owner == ctl)
 				info->access |= SNDRV_CTL_ELEM_ACCESS_OWNER;
-			info->owner = vd->owner_pid;
+			info->owner = pid_vnr(vd->owner->pid);
 		} else {
 			info->owner = -1;
 		}
@@ -723,14 +737,11 @@ static int snd_ctl_elem_read_user(struct snd_card *card,
 {
 	struct snd_ctl_elem_value *control;
 	int result;
-	
-	control = kmalloc(sizeof(*control), GFP_KERNEL);
-	if (control == NULL)
-		return -ENOMEM;	
-	if (copy_from_user(control, _control, sizeof(*control))) {
-		kfree(control);
-		return -EFAULT;
-	}
+
+	control = memdup_user(_control, sizeof(*control));
+	if (IS_ERR(control))
+		return PTR_ERR(control);
+
 	snd_power_lock(card);
 	result = snd_power_wait(card, SNDRV_CTL_POWER_D0);
 	if (result >= 0)
@@ -784,13 +795,10 @@ static int snd_ctl_elem_write_user(struct snd_ctl_file *file,
 	struct snd_card *card;
 	int result;
 
-	control = kmalloc(sizeof(*control), GFP_KERNEL);
-	if (control == NULL)
-		return -ENOMEM;	
-	if (copy_from_user(control, _control, sizeof(*control))) {
-		kfree(control);
-		return -EFAULT;
-	}
+	control = memdup_user(_control, sizeof(*control));
+	if (IS_ERR(control))
+		return PTR_ERR(control);
+
 	card = file->card;
 	snd_power_lock(card);
 	result = snd_power_wait(card, SNDRV_CTL_POWER_D0);
@@ -825,7 +833,6 @@ static int snd_ctl_elem_lock(struct snd_ctl_file *file,
 			result = -EBUSY;
 		else {
 			vd->owner = file;
-			vd->owner_pid = current->pid;
 			result = 0;
 		}
 	}
@@ -856,7 +863,6 @@ static int snd_ctl_elem_unlock(struct snd_ctl_file *file,
 			result = -EPERM;
 		else {
 			vd->owner = NULL;
-			vd->owner_pid = 0;
 			result = 0;
 		}
 	}
@@ -916,13 +922,10 @@ static int snd_ctl_elem_user_tlv(struct snd_kcontrol *kcontrol,
 	if (op_flag > 0) {
 		if (size > 1024 * 128)	/* sane value */
 			return -EINVAL;
-		new_data = kmalloc(size, GFP_KERNEL);
-		if (new_data == NULL)
-			return -ENOMEM;
-		if (copy_from_user(new_data, tlv, size)) {
-			kfree(new_data);
-			return -EFAULT;
-		}
+
+		new_data = memdup_user(tlv, size);
+		if (IS_ERR(new_data))
+			return PTR_ERR(new_data);
 		change = ue->tlv_data_size != size;
 		if (!change)
 			change = memcmp(ue->tlv_data, new_data, size);
@@ -960,7 +963,7 @@ static int snd_ctl_elem_add(struct snd_ctl_file *file,
 	
 	if (card->user_ctl_count >= MAX_USER_CONTROLS)
 		return -ENOMEM;
-	if (info->count > 1024)
+	if (info->count < 1)
 		return -EINVAL;
 	access = info->access == 0 ? SNDRV_CTL_ELEM_ACCESS_READWRITE :
 		(info->access & (SNDRV_CTL_ELEM_ACCESS_READWRITE|
@@ -1061,18 +1064,10 @@ static int snd_ctl_elem_remove(struct snd_ctl_file *file,
 			       struct snd_ctl_elem_id __user *_id)
 {
 	struct snd_ctl_elem_id id;
-	int err;
 
 	if (copy_from_user(&id, _id, sizeof(id)))
 		return -EFAULT;
-	err = snd_ctl_remove_unlocked_id(file, &id);
-	if (! err) {
-		struct snd_card *card = file->card;
-		down_write(&card->controls_rwsem);
-		card->user_ctl_count--;
-		up_write(&card->controls_rwsem);
-	}
-	return err;
+	return snd_ctl_remove_user_ctl(file, &id);
 }
 
 static int snd_ctl_subscribe_events(struct snd_ctl_file *file, int __user *ptr)
@@ -1109,7 +1104,7 @@ static int snd_ctl_tlv_ioctl(struct snd_ctl_file *file,
 
 	if (copy_from_user(&tlv, _tlv, sizeof(tlv)))
 		return -EFAULT;
-	if (tlv.length < sizeof(unsigned int) * 3)
+	if (tlv.length < sizeof(unsigned int) * 2)
 		return -EINVAL;
 	down_read(&card->controls_rwsem);
 	kctl = snd_ctl_find_numid(card, tlv.numid);
@@ -1129,7 +1124,7 @@ static int snd_ctl_tlv_ioctl(struct snd_ctl_file *file,
 	    	goto __kctl_end;
 	}
 	if (vd->access & SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK) {
-		if (file && vd->owner != NULL && vd->owner != file) {
+		if (vd->owner != NULL && vd->owner != file) {
 			err = -EPERM;
 			goto __kctl_end;
 		}
@@ -1373,12 +1368,9 @@ EXPORT_SYMBOL(snd_ctl_unregister_ioctl_compat);
 static int snd_ctl_fasync(int fd, struct file * file, int on)
 {
 	struct snd_ctl_file *ctl;
-	int err;
+
 	ctl = file->private_data;
-	err = fasync_helper(fd, file, on, &ctl->fasync);
-	if (err < 0)
-		return err;
-	return 0;
+	return fasync_helper(fd, file, on, &ctl->fasync);
 }
 
 /*
@@ -1400,6 +1392,7 @@ static const struct file_operations snd_ctl_f_ops =
 	.read =		snd_ctl_read,
 	.open =		snd_ctl_open,
 	.release =	snd_ctl_release,
+	.llseek =	no_llseek,
 	.poll =		snd_ctl_poll,
 	.unlocked_ioctl =	snd_ctl_ioctl,
 	.compat_ioctl =	snd_ctl_ioctl_compat,

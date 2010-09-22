@@ -32,6 +32,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/rbtree.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/gen_stats.h>
 
@@ -66,9 +67,9 @@
 
    NOTES.
 
-   * The stored value for avbps is scaled by 2^5, so that maximal
-     rate is ~1Gbit, avpps is scaled by 2^10.
-
+   * avbps is scaled by 2^5, avpps is scaled by 2^10.
+   * both values are reported as 32 bit unsigned values. bps can
+     overflow for fast links : max speed being 34360Mbit/sec
    * Minimal interval is HZ/4=250msec (it is the greatest common divisor
      for HZ=100 and HZ=1024 8)), maximal interval
      is (HZ*2^EST_MAX_INTERVAL)/4 = 8sec. Shorter intervals
@@ -81,14 +82,14 @@
 struct gen_estimator
 {
 	struct list_head	list;
-	struct gnet_stats_basic	*bstats;
+	struct gnet_stats_basic_packed	*bstats;
 	struct gnet_stats_rate_est	*rate_est;
 	spinlock_t		*stats_lock;
 	int			ewma_log;
 	u64			last_bytes;
+	u64			avbps;
 	u32			last_packets;
 	u32			avpps;
-	u32			avbps;
 	struct rcu_head		e_rcu;
 	struct rb_node		node;
 };
@@ -106,6 +107,7 @@ static DEFINE_RWLOCK(est_lock);
 
 /* Protects against soft lockup during large deletion */
 static struct rb_root est_root = RB_ROOT;
+static DEFINE_SPINLOCK(est_tree_lock);
 
 static void est_timer(unsigned long arg)
 {
@@ -115,6 +117,7 @@ static void est_timer(unsigned long arg)
 	rcu_read_lock();
 	list_for_each_entry_rcu(e, &elist[idx].list, list) {
 		u64 nbytes;
+		u64 brate;
 		u32 npackets;
 		u32 rate;
 
@@ -125,14 +128,14 @@ static void est_timer(unsigned long arg)
 
 		nbytes = e->bstats->bytes;
 		npackets = e->bstats->packets;
-		rate = (nbytes - e->last_bytes)<<(7 - idx);
+		brate = (nbytes - e->last_bytes)<<(7 - idx);
 		e->last_bytes = nbytes;
-		e->avbps += ((long)rate - (long)e->avbps) >> e->ewma_log;
+		e->avbps += (brate >> e->ewma_log) - (e->avbps >> e->ewma_log);
 		e->rate_est->bps = (e->avbps+0xF)>>5;
 
 		rate = (npackets - e->last_packets)<<(12 - idx);
 		e->last_packets = npackets;
-		e->avpps += ((long)rate - (long)e->avpps) >> e->ewma_log;
+		e->avpps += (rate >> e->ewma_log) - (e->avpps >> e->ewma_log);
 		e->rate_est->pps = (e->avpps+0x1FF)>>10;
 skip:
 		read_unlock(&est_lock);
@@ -164,7 +167,7 @@ static void gen_add_node(struct gen_estimator *est)
 }
 
 static
-struct gen_estimator *gen_find_node(const struct gnet_stats_basic *bstats,
+struct gen_estimator *gen_find_node(const struct gnet_stats_basic_packed *bstats,
 				    const struct gnet_stats_rate_est *rate_est)
 {
 	struct rb_node *p = est_root.rb_node;
@@ -199,9 +202,8 @@ struct gen_estimator *gen_find_node(const struct gnet_stats_basic *bstats,
  *
  * Returns 0 on success or a negative error code.
  *
- * NOTE: Called under rtnl_mutex
  */
-int gen_new_estimator(struct gnet_stats_basic *bstats,
+int gen_new_estimator(struct gnet_stats_basic_packed *bstats,
 		      struct gnet_stats_rate_est *rate_est,
 		      spinlock_t *stats_lock,
 		      struct nlattr *opt)
@@ -230,6 +232,7 @@ int gen_new_estimator(struct gnet_stats_basic *bstats,
 	est->last_packets = bstats->packets;
 	est->avpps = rate_est->pps<<10;
 
+	spin_lock(&est_tree_lock);
 	if (!elist[idx].timer.function) {
 		INIT_LIST_HEAD(&elist[idx].list);
 		setup_timer(&elist[idx].timer, est_timer, idx);
@@ -240,6 +243,7 @@ int gen_new_estimator(struct gnet_stats_basic *bstats,
 
 	list_add_rcu(&est->list, &elist[idx].list);
 	gen_add_node(est);
+	spin_unlock(&est_tree_lock);
 
 	return 0;
 }
@@ -259,13 +263,13 @@ static void __gen_kill_estimator(struct rcu_head *head)
  *
  * Removes the rate estimator specified by &bstats and &rate_est.
  *
- * NOTE: Called under rtnl_mutex
  */
-void gen_kill_estimator(struct gnet_stats_basic *bstats,
+void gen_kill_estimator(struct gnet_stats_basic_packed *bstats,
 			struct gnet_stats_rate_est *rate_est)
 {
 	struct gen_estimator *e;
 
+	spin_lock(&est_tree_lock);
 	while ((e = gen_find_node(bstats, rate_est))) {
 		rb_erase(&e->node, &est_root);
 
@@ -276,6 +280,7 @@ void gen_kill_estimator(struct gnet_stats_basic *bstats,
 		list_del_rcu(&e->list);
 		call_rcu(&e->e_rcu, __gen_kill_estimator);
 	}
+	spin_unlock(&est_tree_lock);
 }
 EXPORT_SYMBOL(gen_kill_estimator);
 
@@ -291,7 +296,7 @@ EXPORT_SYMBOL(gen_kill_estimator);
  *
  * Returns 0 on success or a negative error code.
  */
-int gen_replace_estimator(struct gnet_stats_basic *bstats,
+int gen_replace_estimator(struct gnet_stats_basic_packed *bstats,
 			  struct gnet_stats_rate_est *rate_est,
 			  spinlock_t *stats_lock, struct nlattr *opt)
 {
@@ -307,11 +312,17 @@ EXPORT_SYMBOL(gen_replace_estimator);
  *
  * Returns true if estimator is active, and false if not.
  */
-bool gen_estimator_active(const struct gnet_stats_basic *bstats,
+bool gen_estimator_active(const struct gnet_stats_basic_packed *bstats,
 			  const struct gnet_stats_rate_est *rate_est)
 {
+	bool res;
+
 	ASSERT_RTNL();
 
-	return gen_find_node(bstats, rate_est) != NULL;
+	spin_lock(&est_tree_lock);
+	res = gen_find_node(bstats, rate_est) != NULL;
+	spin_unlock(&est_tree_lock);
+
+	return res;
 }
 EXPORT_SYMBOL(gen_estimator_active);

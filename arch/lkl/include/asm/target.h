@@ -8,13 +8,12 @@
 
 #ifdef __GNUC__
 
-#define mb() barrier()
 
 #if __LONG_MAX__  == 9223372036854775807L
 #define BITS_PER_LONG 64
 #else
 #define BITS_PER_LONG 32
-#endif 
+#endif
 
 #ifdef __i386__
 
@@ -29,7 +28,7 @@
 #define TARGET_FORMAT "pe-i386"
 #define TARGET_ARCH   "i386"
 #endif
- 
+
 #endif /* __i386__ */
 
 #ifdef __powerpc__
@@ -48,6 +47,17 @@
 #endif /* __powerpc__ */
 
 #endif /* __GNUC__ */
+
+#ifdef _MSC_VER
+#define LITTLE_ENDIAN
+#define TARGET_FORMAT "pe-i386"
+#define TARGET_ARCH   "i386"
+#define BITS_PER_LONG 32
+#define __signed__ signed
+#define __inline__ __inline
+#define __builtin_constant_p(x) 0
+
+#endif /* _MSC_VER */
 
 
 #if ! defined(BIG_ENDIAN) && ! defined(LITTLE_ENDIAN)

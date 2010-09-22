@@ -22,9 +22,10 @@
 #include <linux/net.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/random.h>
 #include <linux/percpu.h>
 #include <linux/init.h>
+#include <linux/ratelimit.h>
+
 #include <net/sock.h>
 
 #include <asm/byteorder.h>

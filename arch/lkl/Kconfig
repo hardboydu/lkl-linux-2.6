@@ -134,6 +134,10 @@ config LKL_ENV_APR
        bool "Apache Portable Runtime"
 config LKL_ENV_LINUX
        bool "Linux"
+config LKL_ENV_HAIKU_USER
+       bool "Haiku User space"
+config LKL_ENV_HAIKU_KERNEL
+       bool "Haiku Kernel space"
 endchoice
 
 config LKL_DRV_DISK
@@ -151,6 +155,8 @@ source "net/Kconfig"
 source "drivers/base/Kconfig"
 
 source "fs/Kconfig"
+
+source "mm/Kconfig"
 
 source "security/Kconfig"
 

@@ -103,7 +103,7 @@ void oom_timer(unsigned long data)
 {
         struct net_device *dev = (struct net_device *)data;
 	struct tulip_private *tp = netdev_priv(dev);
-	netif_rx_schedule(&tp->napi);
+	napi_schedule(&tp->napi);
 }
 
 int tulip_poll(struct napi_struct *napi, int budget)
@@ -125,12 +125,12 @@ int tulip_poll(struct napi_struct *napi, int budget)
 #endif
 
 	if (tulip_debug > 4)
-		printk(KERN_DEBUG " In tulip_rx(), entry %d %8.8x.\n", entry,
-			   tp->rx_ring[entry].status);
+		printk(KERN_DEBUG " In tulip_rx(), entry %d %08x\n",
+		       entry, tp->rx_ring[entry].status);
 
        do {
 		if (ioread32(tp->base_addr + CSR5) == 0xffffffff) {
-			printk(KERN_DEBUG " In tulip_poll(), hardware disappeared.\n");
+			printk(KERN_DEBUG " In tulip_poll(), hardware disappeared\n");
 			break;
 		}
                /* Acknowledge current RX interrupt sources. */
@@ -140,55 +140,69 @@ int tulip_poll(struct napi_struct *napi, int budget)
                /* If we own the next entry, it is a new packet. Send it up. */
                while ( ! (tp->rx_ring[entry].status & cpu_to_le32(DescOwned))) {
                        s32 status = le32_to_cpu(tp->rx_ring[entry].status);
+		       short pkt_len;
 
                        if (tp->dirty_rx + RX_RING_SIZE == tp->cur_rx)
                                break;
 
                        if (tulip_debug > 5)
-                               printk(KERN_DEBUG "%s: In tulip_rx(), entry %d %8.8x.\n",
+                               printk(KERN_DEBUG "%s: In tulip_rx(), entry %d %08x\n",
                                       dev->name, entry, status);
 
 		       if (++work_done >= budget)
                                goto not_done;
 
-                       if ((status & 0x38008300) != 0x0300) {
-                               if ((status & 0x38000300) != 0x0300) {
+		       /*
+			* Omit the four octet CRC from the length.
+			* (May not be considered valid until we have
+			* checked status for RxLengthOver2047 bits)
+			*/
+		       pkt_len = ((status >> 16) & 0x7ff) - 4;
+
+		       /*
+			* Maximum pkt_len is 1518 (1514 + vlan header)
+			* Anything higher than this is always invalid
+			* regardless of RxLengthOver2047 bits
+			*/
+
+		       if ((status & (RxLengthOver2047 |
+				      RxDescCRCError |
+				      RxDescCollisionSeen |
+				      RxDescRunt |
+				      RxDescDescErr |
+				      RxWholePkt)) != RxWholePkt ||
+			   pkt_len > 1518) {
+			       if ((status & (RxLengthOver2047 |
+					      RxWholePkt)) != RxWholePkt) {
                                 /* Ingore earlier buffers. */
                                        if ((status & 0xffff) != 0x7fff) {
                                                if (tulip_debug > 1)
-                                                       printk(KERN_WARNING "%s: Oversized Ethernet frame "
-                                                              "spanned multiple buffers, status %8.8x!\n",
-                                                              dev->name, status);
+                                                       dev_warn(&dev->dev,
+								"Oversized Ethernet frame spanned multiple buffers, status %08x!\n",
+								status);
                                                tp->stats.rx_length_errors++;
                                        }
-                               } else if (status & RxDescFatalErr) {
+			       } else {
                                 /* There was a fatal error. */
                                        if (tulip_debug > 2)
-                                               printk(KERN_DEBUG "%s: Receive error, Rx status %8.8x.\n",
+                                               printk(KERN_DEBUG "%s: Receive error, Rx status %08x\n",
                                                       dev->name, status);
                                        tp->stats.rx_errors++; /* end of a packet.*/
-                                       if (status & 0x0890) tp->stats.rx_length_errors++;
+				       if (pkt_len > 1518 ||
+					   (status & RxDescRunt))
+					       tp->stats.rx_length_errors++;
+
                                        if (status & 0x0004) tp->stats.rx_frame_errors++;
                                        if (status & 0x0002) tp->stats.rx_crc_errors++;
                                        if (status & 0x0001) tp->stats.rx_fifo_errors++;
                                }
                        } else {
-                               /* Omit the four octet CRC from the length. */
-                               short pkt_len = ((status >> 16) & 0x7ff) - 4;
                                struct sk_buff *skb;
 
-#ifndef final_version
-                               if (pkt_len > 1518) {
-                                       printk(KERN_WARNING "%s: Bogus packet size of %d (%#x).\n",
-                                              dev->name, pkt_len, pkt_len);
-                                       pkt_len = 1518;
-                                       tp->stats.rx_length_errors++;
-                               }
-#endif
                                /* Check if the packet is long enough to accept without copying
                                   to a minimally-sized skbuff. */
-                               if (pkt_len < tulip_rx_copybreak
-                                   && (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
+                               if (pkt_len < tulip_rx_copybreak &&
+                                   (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
                                        skb_reserve(skb, 2);    /* 16 byte align the IP header */
                                        pci_dma_sync_single_for_cpu(tp->pdev,
 								   tp->rx_buffers[entry].mapping,
@@ -212,12 +226,11 @@ int tulip_poll(struct napi_struct *napi, int budget)
 #ifndef final_version
                                        if (tp->rx_buffers[entry].mapping !=
                                            le32_to_cpu(tp->rx_ring[entry].buffer1)) {
-                                               printk(KERN_ERR "%s: Internal fault: The skbuff addresses "
-                                                      "do not match in tulip_rx: %08x vs. %08llx %p / %p.\n",
-                                                      dev->name,
-                                                      le32_to_cpu(tp->rx_ring[entry].buffer1),
-                                                      (unsigned long long)tp->rx_buffers[entry].mapping,
-                                                      skb->head, temp);
+                                               dev_err(&dev->dev,
+						       "Internal fault: The skbuff addresses do not match in tulip_rx: %08x vs. %08llx %p / %p\n",
+						       le32_to_cpu(tp->rx_ring[entry].buffer1),
+						       (unsigned long long)tp->rx_buffers[entry].mapping,
+						       skb->head, temp);
                                        }
 #endif
 
@@ -300,7 +313,7 @@ int tulip_poll(struct napi_struct *napi, int budget)
 
          /* Remove us from polling list and enable RX intr. */
 
-         netif_rx_complete(napi);
+         napi_complete(napi);
          iowrite32(tulip_tbl[tp->chip_id].valid_intrs, tp->base_addr+CSR7);
 
          /* The last op happens after poll completion. Which means the following:
@@ -333,10 +346,10 @@ int tulip_poll(struct napi_struct *napi, int budget)
 
          /* Think: timer_pending() was an explicit signature of bug.
           * Timer can be pending now but fired and completed
-          * before we did netif_rx_complete(). See? We would lose it. */
+          * before we did napi_complete(). See? We would lose it. */
 
          /* remove ourselves from the polling list */
-         netif_rx_complete(napi);
+         napi_complete(napi);
 
          return work_done;
 }
@@ -351,56 +364,68 @@ static int tulip_rx(struct net_device *dev)
 	int received = 0;
 
 	if (tulip_debug > 4)
-		printk(KERN_DEBUG " In tulip_rx(), entry %d %8.8x.\n", entry,
-			   tp->rx_ring[entry].status);
+		printk(KERN_DEBUG " In tulip_rx(), entry %d %08x\n",
+		       entry, tp->rx_ring[entry].status);
 	/* If we own the next entry, it is a new packet. Send it up. */
 	while ( ! (tp->rx_ring[entry].status & cpu_to_le32(DescOwned))) {
 		s32 status = le32_to_cpu(tp->rx_ring[entry].status);
+		short pkt_len;
 
 		if (tulip_debug > 5)
-			printk(KERN_DEBUG "%s: In tulip_rx(), entry %d %8.8x.\n",
-				   dev->name, entry, status);
+			printk(KERN_DEBUG "%s: In tulip_rx(), entry %d %08x\n",
+			       dev->name, entry, status);
 		if (--rx_work_limit < 0)
 			break;
-		if ((status & 0x38008300) != 0x0300) {
-			if ((status & 0x38000300) != 0x0300) {
+
+		/*
+		  Omit the four octet CRC from the length.
+		  (May not be considered valid until we have
+		  checked status for RxLengthOver2047 bits)
+		*/
+		pkt_len = ((status >> 16) & 0x7ff) - 4;
+		/*
+		  Maximum pkt_len is 1518 (1514 + vlan header)
+		  Anything higher than this is always invalid
+		  regardless of RxLengthOver2047 bits
+		*/
+
+		if ((status & (RxLengthOver2047 |
+			       RxDescCRCError |
+			       RxDescCollisionSeen |
+			       RxDescRunt |
+			       RxDescDescErr |
+			       RxWholePkt))        != RxWholePkt ||
+		    pkt_len > 1518) {
+			if ((status & (RxLengthOver2047 |
+			     RxWholePkt))         != RxWholePkt) {
 				/* Ingore earlier buffers. */
 				if ((status & 0xffff) != 0x7fff) {
 					if (tulip_debug > 1)
-						printk(KERN_WARNING "%s: Oversized Ethernet frame "
-							   "spanned multiple buffers, status %8.8x!\n",
-							   dev->name, status);
+						dev_warn(&dev->dev,
+							 "Oversized Ethernet frame spanned multiple buffers, status %08x!\n",
+							 status);
 					tp->stats.rx_length_errors++;
 				}
-			} else if (status & RxDescFatalErr) {
+			} else {
 				/* There was a fatal error. */
 				if (tulip_debug > 2)
-					printk(KERN_DEBUG "%s: Receive error, Rx status %8.8x.\n",
-						   dev->name, status);
+					printk(KERN_DEBUG "%s: Receive error, Rx status %08x\n",
+					       dev->name, status);
 				tp->stats.rx_errors++; /* end of a packet.*/
-				if (status & 0x0890) tp->stats.rx_length_errors++;
+				if (pkt_len > 1518 ||
+				    (status & RxDescRunt))
+					tp->stats.rx_length_errors++;
 				if (status & 0x0004) tp->stats.rx_frame_errors++;
 				if (status & 0x0002) tp->stats.rx_crc_errors++;
 				if (status & 0x0001) tp->stats.rx_fifo_errors++;
 			}
 		} else {
-			/* Omit the four octet CRC from the length. */
-			short pkt_len = ((status >> 16) & 0x7ff) - 4;
 			struct sk_buff *skb;
-
-#ifndef final_version
-			if (pkt_len > 1518) {
-				printk(KERN_WARNING "%s: Bogus packet size of %d (%#x).\n",
-					   dev->name, pkt_len, pkt_len);
-				pkt_len = 1518;
-				tp->stats.rx_length_errors++;
-			}
-#endif
 
 			/* Check if the packet is long enough to accept without copying
 			   to a minimally-sized skbuff. */
-			if (pkt_len < tulip_rx_copybreak
-				&& (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
+			if (pkt_len < tulip_rx_copybreak &&
+			    (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
 				skb_reserve(skb, 2);	/* 16 byte align the IP header */
 				pci_dma_sync_single_for_cpu(tp->pdev,
 							    tp->rx_buffers[entry].mapping,
@@ -424,12 +449,11 @@ static int tulip_rx(struct net_device *dev)
 #ifndef final_version
 				if (tp->rx_buffers[entry].mapping !=
 				    le32_to_cpu(tp->rx_ring[entry].buffer1)) {
-					printk(KERN_ERR "%s: Internal fault: The skbuff addresses "
-					       "do not match in tulip_rx: %08x vs. %Lx %p / %p.\n",
-					       dev->name,
-					       le32_to_cpu(tp->rx_ring[entry].buffer1),
-					       (long long)tp->rx_buffers[entry].mapping,
-					       skb->head, temp);
+					dev_err(&dev->dev,
+						"Internal fault: The skbuff addresses do not match in tulip_rx: %08x vs. %Lx %p / %p\n",
+						le32_to_cpu(tp->rx_ring[entry].buffer1),
+						(long long)tp->rx_buffers[entry].mapping,
+						skb->head, temp);
 				}
 #endif
 
@@ -519,7 +543,7 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 			rxd++;
 			/* Mask RX intrs and add the device to poll list. */
 			iowrite32(tulip_tbl[tp->chip_id].valid_intrs&~RxPollInt, ioaddr + CSR7);
-			netif_rx_schedule(&tp->napi);
+			napi_schedule(&tp->napi);
 
 			if (!(csr5&~(AbnormalIntr|NormalIntr|RxPollInt|TPLnkPass)))
                                break;
@@ -543,7 +567,7 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 #endif /*  CONFIG_TULIP_NAPI */
 
 		if (tulip_debug > 4)
-			printk(KERN_DEBUG "%s: interrupt  csr5=%#8.8x new csr5=%#8.8x.\n",
+			printk(KERN_DEBUG "%s: interrupt  csr5=%#8.8x new csr5=%#8.8x\n",
 			       dev->name, csr5, ioread32(ioaddr + CSR5));
 
 
@@ -575,8 +599,8 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 					/* There was an major error, log it. */
 #ifndef final_version
 					if (tulip_debug > 1)
-						printk(KERN_DEBUG "%s: Transmit error, Tx status %8.8x.\n",
-							   dev->name, status);
+						printk(KERN_DEBUG "%s: Transmit error, Tx status %08x\n",
+						       dev->name, status);
 #endif
 					tp->stats.tx_errors++;
 					if (status & 0x4104) tp->stats.tx_aborted_errors++;
@@ -605,8 +629,9 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 
 #ifndef final_version
 			if (tp->cur_tx - dirty_tx > TX_RING_SIZE) {
-				printk(KERN_ERR "%s: Out-of-sync dirty pointer, %d vs. %d.\n",
-					   dev->name, dirty_tx, tp->cur_tx);
+				dev_err(&dev->dev,
+					"Out-of-sync dirty pointer, %d vs. %d\n",
+					dirty_tx, tp->cur_tx);
 				dirty_tx += TX_RING_SIZE;
 			}
 #endif
@@ -617,9 +642,10 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 			tp->dirty_tx = dirty_tx;
 			if (csr5 & TxDied) {
 				if (tulip_debug > 2)
-					printk(KERN_WARNING "%s: The transmitter stopped."
-						   "  CSR5 is %x, CSR6 %x, new CSR6 %x.\n",
-						   dev->name, csr5, ioread32(ioaddr + CSR6), tp->csr6);
+					dev_warn(&dev->dev,
+						 "The transmitter stopped.  CSR5 is %x, CSR6 %x, new CSR6 %x\n",
+						 csr5, ioread32(ioaddr + CSR6),
+						 tp->csr6);
 				tulip_restart_rxtx(tp);
 			}
 			spin_unlock(&tp->lock);
@@ -670,8 +696,9 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 				 * to the 21142/3 docs that is).
 				 *   -- rmk
 				 */
-				printk(KERN_ERR "%s: (%lu) System Error occurred (%d)\n",
-					dev->name, tp->nir, error);
+				dev_err(&dev->dev,
+					"(%lu) System Error occurred (%d)\n",
+					tp->nir, error);
 			}
 			/* Clear all error sources, included undocumented ones! */
 			iowrite32(0x0800f7ba, ioaddr + CSR5);
@@ -680,16 +707,17 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 		if (csr5 & TimerInt) {
 
 			if (tulip_debug > 2)
-				printk(KERN_ERR "%s: Re-enabling interrupts, %8.8x.\n",
-					   dev->name, csr5);
+				dev_err(&dev->dev,
+					"Re-enabling interrupts, %08x\n",
+					csr5);
 			iowrite32(tulip_tbl[tp->chip_id].valid_intrs, ioaddr + CSR7);
 			tp->ttimer = 0;
 			oi++;
 		}
 		if (tx > maxtx || rx > maxrx || oi > maxoi) {
 			if (tulip_debug > 1)
-				printk(KERN_WARNING "%s: Too much work during an interrupt, "
-					   "csr5=0x%8.8x. (%lu) (%d,%d,%d)\n", dev->name, csr5, tp->nir, tx, rx, oi);
+				dev_warn(&dev->dev, "Too much work during an interrupt, csr5=0x%08x. (%lu) (%d,%d,%d)\n",
+					 csr5, tp->nir, tx, rx, oi);
 
                        /* Acknowledge all interrupt sources. */
                         iowrite32(0x8001ffff, ioaddr + CSR5);
@@ -738,14 +766,18 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 	entry = tp->dirty_rx % RX_RING_SIZE;
 	if (tp->rx_buffers[entry].skb == NULL) {
 		if (tulip_debug > 1)
-			printk(KERN_WARNING "%s: in rx suspend mode: (%lu) (tp->cur_rx = %u, ttimer = %d, rx = %d) go/stay in suspend mode\n", dev->name, tp->nir, tp->cur_rx, tp->ttimer, rx);
+			dev_warn(&dev->dev,
+				 "in rx suspend mode: (%lu) (tp->cur_rx = %u, ttimer = %d, rx = %d) go/stay in suspend mode\n",
+				 tp->nir, tp->cur_rx, tp->ttimer, rx);
 		if (tp->chip_id == LC82C168) {
 			iowrite32(0x00, ioaddr + CSR7);
 			mod_timer(&tp->timer, RUN_AT(HZ/50));
 		} else {
 			if (tp->ttimer == 0 || (ioread32(ioaddr + CSR11) & 0xffff) == 0) {
 				if (tulip_debug > 1)
-					printk(KERN_WARNING "%s: in rx suspend mode: (%lu) set timer\n", dev->name, tp->nir);
+					dev_warn(&dev->dev,
+						 "in rx suspend mode: (%lu) set timer\n",
+						 tp->nir);
 				iowrite32(tulip_tbl[tp->chip_id].valid_intrs | TimerInt,
 					ioaddr + CSR7);
 				iowrite32(TimerInt, ioaddr + CSR5);
@@ -761,8 +793,8 @@ irqreturn_t tulip_interrupt(int irq, void *dev_instance)
 	}
 
 	if (tulip_debug > 4)
-		printk(KERN_DEBUG "%s: exiting interrupt, csr5=%#4.4x.\n",
-			   dev->name, ioread32(ioaddr + CSR5));
+		printk(KERN_DEBUG "%s: exiting interrupt, csr5=%#04x\n",
+		       dev->name, ioread32(ioaddr + CSR5));
 
 	return IRQ_HANDLED;
 }

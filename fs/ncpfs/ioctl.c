@@ -15,10 +15,12 @@
 #include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/mount.h>
+#include <linux/slab.h>
 #include <linux/highuid.h>
 #include <linux/smp_lock.h>
 #include <linux/vmalloc.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 
 #include <linux/ncp_fs.h>
 
@@ -223,10 +225,8 @@ ncp_set_charsets(struct ncp_server* server, struct ncp_nls_ioctl __user *arg)
 	oldset_io = server->nls_io;
 	server->nls_io = iocharset;
 
-	if (oldset_cp)
-		unload_nls(oldset_cp);
-	if (oldset_io)
-		unload_nls(oldset_io);
+	unload_nls(oldset_cp);
+	unload_nls(oldset_io);
 
 	return 0;
 }
@@ -262,9 +262,9 @@ ncp_get_charsets(struct ncp_server* server, struct ncp_nls_ioctl __user *arg)
 }
 #endif /* CONFIG_NCPFS_NLS */
 
-static int __ncp_ioctl(struct inode *inode, struct file *filp,
-	      unsigned int cmd, unsigned long arg)
+static long __ncp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
+	struct inode *inode = filp->f_dentry->d_inode;
 	struct ncp_server *server = NCP_SERVER(inode);
 	int result;
 	struct ncp_ioctl_request request;
@@ -442,7 +442,7 @@ static int __ncp_ioctl(struct inode *inode, struct file *filp,
 			if (dentry) {
 				struct inode* s_inode = dentry->d_inode;
 				
-				if (inode) {
+				if (s_inode) {
 					NCP_FINFO(s_inode)->volNumber = vnum;
 					NCP_FINFO(s_inode)->dirEntNum = de;
 					NCP_FINFO(s_inode)->DosDirNum = dosde;
@@ -660,13 +660,10 @@ outrel:
 			if (user.object_name_len > NCP_OBJECT_NAME_MAX_LEN)
 				return -ENOMEM;
 			if (user.object_name_len) {
-				newname = kmalloc(user.object_name_len, GFP_USER);
-				if (!newname)
-					return -ENOMEM;
-				if (copy_from_user(newname, user.object_name, user.object_name_len)) {
-					kfree(newname);
-					return -EFAULT;
-				}
+				newname = memdup_user(user.object_name,
+						      user.object_name_len);
+				if (IS_ERR(newname))
+					return PTR_ERR(newname);
 			} else {
 				newname = NULL;
 			}
@@ -760,13 +757,9 @@ outrel:
 			if (user.len > NCP_PRIVATE_DATA_MAX_LEN)
 				return -ENOMEM;
 			if (user.len) {
-				new = kmalloc(user.len, GFP_USER);
-				if (!new)
-					return -ENOMEM;
-				if (copy_from_user(new, user.data, user.len)) {
-					kfree(new);
-					return -EFAULT;
-				}
+				new = memdup_user(user.data, user.len);
+				if (IS_ERR(new))
+					return PTR_ERR(new);
 			} else {
 				new = NULL;
 			}
@@ -844,16 +837,16 @@ static int ncp_ioctl_need_write(unsigned int cmd)
 	case NCP_IOC_SETROOT:
 		return 0;
 	default:
-		/* unkown IOCTL command, assume write */
+		/* unknown IOCTL command, assume write */
 		return 1;
 	}
 }
 
-int ncp_ioctl(struct inode *inode, struct file *filp,
-	      unsigned int cmd, unsigned long arg)
+long ncp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	int ret;
+	long ret;
 
+	lock_kernel();
 	if (ncp_ioctl_need_write(cmd)) {
 		/*
 		 * inside the ioctl(), any failures which
@@ -861,24 +854,28 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		 * -EACCESS, so it seems consistent to keep
 		 *  that here.
 		 */
-		if (mnt_want_write(filp->f_path.mnt))
-			return -EACCES;
+		if (mnt_want_write(filp->f_path.mnt)) {
+			ret = -EACCES;
+			goto out;
+		}
 	}
-	ret = __ncp_ioctl(inode, filp, cmd, arg);
+	ret = __ncp_ioctl(filp, cmd, arg);
 	if (ncp_ioctl_need_write(cmd))
 		mnt_drop_write(filp->f_path.mnt);
+
+out:
+	unlock_kernel();
 	return ret;
 }
 
 #ifdef CONFIG_COMPAT
 long ncp_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
-	int ret;
+	long ret;
 
 	lock_kernel();
 	arg = (unsigned long) compat_ptr(arg);
-	ret = ncp_ioctl(inode, file, cmd, arg);
+	ret = ncp_ioctl(file, cmd, arg);
 	unlock_kernel();
 	return ret;
 }

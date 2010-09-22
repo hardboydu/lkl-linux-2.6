@@ -18,8 +18,8 @@
 #include "hpusb.h"
 
 
-extern u16_t zfDelayWriteInternalReg(zdev_t* dev, u32_t addr, u32_t val);
-extern u16_t zfFlushDelayWrite(zdev_t* dev);
+extern u16_t zfDelayWriteInternalReg(zdev_t *dev, u32_t addr, u32_t val);
+extern u16_t zfFlushDelayWrite(zdev_t *dev);
 
 /*
  * Anti noise immunity support.  We track phy errors and react
@@ -52,13 +52,13 @@ extern u16_t zfFlushDelayWrite(zdev_t* dev);
 #define ZM_HAL_EP_RND(x, mul) \
     ((((x)%(mul)) >= ((mul)/2)) ? ((x) + ((mul) - 1)) / (mul) : (x)/(mul))
 
-s32_t BEACON_RSSI(zdev_t* dev)
+s32_t BEACON_RSSI(zdev_t *dev)
 {
     s32_t rssi;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    HpPriv = (struct zsHpPriv *)wd->hpPrivate;
 
     rssi = ZM_HAL_EP_RND(HpPriv->stats.ast_nodestats.ns_avgbrssi, ZM_HAL_RSSI_EP_MULTIPLIER);
 
@@ -70,23 +70,22 @@ s32_t BEACON_RSSI(zdev_t* dev)
  * resets the channel statistics
  */
 
-void zfHpAniAttach(zdev_t* dev)
+void zfHpAniAttach(zdev_t *dev)
 {
 #define N(a)     (sizeof(a) / sizeof(a[0]))
     u32_t i;
-
-    zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    struct zsHpPriv *HpPriv;
 
     const int totalSizeDesired[] = { -55, -55, -55, -55, -62 };
     const int coarseHigh[]       = { -14, -14, -14, -14, -12 };
     const int coarseLow[]        = { -64, -64, -64, -64, -70 };
     const int firpwr[]           = { -78, -78, -78, -78, -80 };
 
-    for (i = 0; i < 5; i++)
-    {
-        HpPriv->totalSizeDesired[i] = totalSizeDesired[i];
+    zmw_get_wlan_dev(dev);
+    HpPriv = (struct zsHpPriv *)wd->hpPrivate;
+
+    for (i = 0; i < 5; i++) {
+	HpPriv->totalSizeDesired[i] = totalSizeDesired[i];
         HpPriv->coarseHigh[i] = coarseHigh[i];
         HpPriv->coarseLow[i] = coarseLow[i];
         HpPriv->firpwr[i] = firpwr[i];
@@ -96,8 +95,7 @@ void zfHpAniAttach(zdev_t* dev)
     HpPriv->hasHwPhyCounters = 1;
 
     memset((char *)&HpPriv->ani, 0, sizeof(HpPriv->ani));
-    for (i = 0; i < N(wd->regulationTable.allowChannel); i++)
-    {
+    for (i = 0; i < ARRAY_SIZE(HpPriv->ani); i++) {
         /* New ANI stuff */
         HpPriv->ani[i].ofdmTrigHigh = ZM_HAL_ANI_OFDM_TRIG_HIGH;
         HpPriv->ani[i].ofdmTrigLow = ZM_HAL_ANI_OFDM_TRIG_LOW;
@@ -109,14 +107,12 @@ void zfHpAniAttach(zdev_t* dev)
         HpPriv->ani[i].cckWeakSigThreshold = ZM_HAL_ANI_CCK_WEAK_SIG_THR;
         HpPriv->ani[i].spurImmunityLevel = ZM_HAL_ANI_SPUR_IMMUNE_LVL;
         HpPriv->ani[i].firstepLevel = ZM_HAL_ANI_FIRSTEP_LVL;
-        if (HpPriv->hasHwPhyCounters)
-        {
+        if (HpPriv->hasHwPhyCounters) {
             HpPriv->ani[i].ofdmPhyErrBase = 0;//AR_PHY_COUNTMAX - ZM_HAL_ANI_OFDM_TRIG_HIGH;
             HpPriv->ani[i].cckPhyErrBase = 0;//AR_PHY_COUNTMAX - ZM_HAL_ANI_CCK_TRIG_HIGH;
         }
     }
-    if (HpPriv->hasHwPhyCounters)
-    {
+    if (HpPriv->hasHwPhyCounters) {
         //zm_debug_msg2("Setting OfdmErrBase = 0x", HpPriv->ani[0].ofdmPhyErrBase);
         //zm_debug_msg2("Setting cckErrBase = 0x", HpPriv->ani[0].cckPhyErrBase);
         //OS_REG_WRITE(ah, AR_PHY_ERR_1, HpPriv->ani[0].ofdmPhyErrBase);
@@ -135,16 +131,16 @@ void zfHpAniAttach(zdev_t* dev)
 /*
  * Control Adaptive Noise Immunity Parameters
  */
-u8_t zfHpAniControl(zdev_t* dev, ZM_HAL_ANI_CMD cmd, int param)
+u8_t zfHpAniControl(zdev_t *dev, ZM_HAL_ANI_CMD cmd, int param)
 {
 #define N(a) (sizeof(a)/sizeof(a[0]))
     typedef s32_t TABLE[];
+    struct zsHpPriv *HpPriv;
+    struct zsAniState *aniState;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
-
-    struct zsAniState *aniState = HpPriv->curani;
+    HpPriv = (struct zsHpPriv *)wd->hpPrivate;
+    aniState = HpPriv->curani;
 
     switch (cmd)
     {
@@ -152,8 +148,7 @@ u8_t zfHpAniControl(zdev_t* dev, ZM_HAL_ANI_CMD cmd, int param)
     {
         u32_t level = param;
 
-        if (level >= N(HpPriv->totalSizeDesired))
-        {
+        if (level >= N(HpPriv->totalSizeDesired)) {
           zm_debug_msg1("level out of range, desired level : ", level);
           zm_debug_msg1("max level : ", N(HpPriv->totalSizeDesired));
           return FALSE;
@@ -346,11 +341,10 @@ u8_t zfHpAniControl(zdev_t* dev, ZM_HAL_ANI_CMD cmd, int param)
 void zfHpAniRestart(zdev_t* dev)
 {
     struct zsAniState *aniState;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
-
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
     aniState = HpPriv->curani;
 
     aniState->listenTime = 0;
@@ -387,10 +381,10 @@ void zfHpAniOfdmErrTrigger(zdev_t* dev)
 {
     struct zsAniState *aniState;
     s32_t rssi;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
 
     //HALASSERT(chan != NULL);
 
@@ -466,10 +460,10 @@ void zfHpAniCckErrTrigger(zdev_t* dev)
 {
     struct zsAniState *aniState;
     s32_t rssi;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
 
     //HALASSERT(chan != NULL);
 
@@ -511,11 +505,10 @@ void zfHpAniLowerImmunity(zdev_t* dev)
 {
     struct zsAniState *aniState;
     s32_t rssi;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
-
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
     aniState = HpPriv->curani;
 
     rssi = BEACON_RSSI(dev);
@@ -586,10 +579,10 @@ s32_t zfHpAniGetListenTime(zdev_t* dev)
     struct zsAniState *aniState;
     u32_t txFrameCount, rxFrameCount, cycleCount;
     s32_t listenTime;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
 
     txFrameCount = 0;//OS_REG_READ(ah, AR_TFCNT);
     rxFrameCount = 0;//OS_REG_READ(ah, AR_RFCNT);
@@ -627,10 +620,10 @@ void zfHpAniArPoll(zdev_t* dev, u32_t listenTime, u32_t phyCnt1, u32_t phyCnt2)
 {
     struct zsAniState *aniState;
     //s32_t listenTime;
+    struct zsHpPriv *HpPriv;
 
     zmw_get_wlan_dev(dev);
-
-    struct zsHpPriv *HpPriv = (struct zsHpPriv*)wd->hpPrivate;
+    HpPriv = (struct zsHpPriv*)wd->hpPrivate;
 
     /*
      * Since we're called from end of rx tasklet, we also check for

@@ -6,7 +6,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2010, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -88,7 +88,8 @@ acpi_ns_report_error(const char *module_name,
 
 		/* There is a non-ascii character in the name */
 
-		ACPI_MOVE_32_TO_32(&bad_name, internal_name);
+		ACPI_MOVE_32_TO_32(&bad_name,
+				   ACPI_CAST_PTR(u32, internal_name));
 		acpi_os_printf("[0x%4.4X] (NON-ASCII)", bad_name);
 	} else {
 		/* Convert path to external format */
@@ -275,7 +276,7 @@ u32 acpi_ns_local(acpi_object_type type)
 
 		/* Type code out of range  */
 
-		ACPI_WARNING((AE_INFO, "Invalid Object Type %X", type));
+		ACPI_WARNING((AE_INFO, "Invalid Object Type 0x%X", type));
 		return_UINT32(ACPI_NS_NORMAL);
 	}
 
@@ -325,9 +326,8 @@ void acpi_ns_get_internal_name_length(struct acpi_namestring_info *info)
 			next_external_char++;
 		}
 	} else {
-		/*
-		 * Handle Carat prefixes
-		 */
+		/* Handle Carat prefixes */
+
 		while (*next_external_char == '^') {
 			info->num_carats++;
 			next_external_char++;
@@ -552,9 +552,8 @@ acpi_ns_externalize_name(u32 internal_name_length,
 		return_ACPI_STATUS(AE_BAD_PARAMETER);
 	}
 
-	/*
-	 * Check for a prefix (one '\' | one or more '^').
-	 */
+	/* Check for a prefix (one '\' | one or more '^') */
+
 	switch (internal_name[0]) {
 	case '\\':
 		prefix_length = 1;
@@ -580,7 +579,7 @@ acpi_ns_externalize_name(u32 internal_name_length,
 	}
 
 	/*
-	 * Check for object names.  Note that there could be 0-255 of these
+	 * Check for object names. Note that there could be 0-255 of these
 	 * 4-byte elements.
 	 */
 	if (prefix_length < internal_name_length) {
@@ -637,9 +636,8 @@ acpi_ns_externalize_name(u32 internal_name_length,
 		return_ACPI_STATUS(AE_BAD_PATHNAME);
 	}
 
-	/*
-	 * Build converted_name
-	 */
+	/* Build the converted_name */
+
 	*converted_name = ACPI_ALLOCATE_ZEROED(required_length);
 	if (!(*converted_name)) {
 		return_ACPI_STATUS(AE_NO_MEMORY);
@@ -673,28 +671,31 @@ acpi_ns_externalize_name(u32 internal_name_length,
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_map_handle_to_node
+ * FUNCTION:    acpi_ns_validate_handle
  *
- * PARAMETERS:  Handle          - Handle to be converted to an Node
+ * PARAMETERS:  Handle          - Handle to be validated and typecast to a
+ *                                namespace node.
  *
- * RETURN:      A Name table entry pointer
+ * RETURN:      A pointer to a namespace node
  *
- * DESCRIPTION: Convert a namespace handle to a real Node
+ * DESCRIPTION: Convert a namespace handle to a namespace node. Handles special
+ *              cases for the root node.
  *
- * Note: Real integer handles would allow for more verification
+ * NOTE: Real integer handles would allow for more verification
  *       and keep all pointers within this subsystem - however this introduces
- *       more (and perhaps unnecessary) overhead.
+ *       more overhead and has not been necessary to this point. Drivers
+ *       holding handles are typically notified before a node becomes invalid
+ *       due to a table unload.
  *
  ******************************************************************************/
 
-struct acpi_namespace_node *acpi_ns_map_handle_to_node(acpi_handle handle)
+struct acpi_namespace_node *acpi_ns_validate_handle(acpi_handle handle)
 {
 
 	ACPI_FUNCTION_ENTRY();
 
-	/*
-	 * Simple implementation
-	 */
+	/* Parameter validation */
+
 	if ((!handle) || (handle == ACPI_ROOT_OBJECT)) {
 		return (acpi_gbl_root_node);
 	}
@@ -706,42 +707,6 @@ struct acpi_namespace_node *acpi_ns_map_handle_to_node(acpi_handle handle)
 	}
 
 	return (ACPI_CAST_PTR(struct acpi_namespace_node, handle));
-}
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ns_convert_entry_to_handle
- *
- * PARAMETERS:  Node          - Node to be converted to a Handle
- *
- * RETURN:      A user handle
- *
- * DESCRIPTION: Convert a real Node to a namespace handle
- *
- ******************************************************************************/
-
-acpi_handle acpi_ns_convert_entry_to_handle(struct acpi_namespace_node *node)
-{
-
-	/*
-	 * Simple implementation for now;
-	 */
-	return ((acpi_handle) node);
-
-/* Example future implementation ---------------------
-
-	if (!Node)
-	{
-		return (NULL);
-	}
-
-	if (Node == acpi_gbl_root_node)
-	{
-		return (ACPI_ROOT_OBJECT);
-	}
-
-	return ((acpi_handle) Node);
-------------------------------------------------------*/
 }
 
 /*******************************************************************************
@@ -799,7 +764,7 @@ u32 acpi_ns_opens_scope(acpi_object_type type)
 
 		/* type code out of range  */
 
-		ACPI_WARNING((AE_INFO, "Invalid Object Type %X", type));
+		ACPI_WARNING((AE_INFO, "Invalid Object Type 0x%X", type));
 		return_UINT32(ACPI_NS_NORMAL);
 	}
 
@@ -837,7 +802,7 @@ acpi_ns_get_node(struct acpi_namespace_node *prefix_node,
 	acpi_status status;
 	char *internal_path;
 
-	ACPI_FUNCTION_TRACE_PTR(ns_get_node, pathname);
+	ACPI_FUNCTION_TRACE_PTR(ns_get_node, ACPI_CAST_PTR(char, pathname));
 
 	if (!pathname) {
 		*return_node = prefix_node;
@@ -872,7 +837,7 @@ acpi_ns_get_node(struct acpi_namespace_node *prefix_node,
 				(flags | ACPI_NS_DONT_OPEN_SCOPE), NULL,
 				return_node);
 	if (ACPI_FAILURE(status)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "%s, %s\n",
+		ACPI_DEBUG_PRINT((ACPI_DB_EXEC, "%s, %s\n",
 				  pathname, acpi_format_exception(status)));
 	}
 

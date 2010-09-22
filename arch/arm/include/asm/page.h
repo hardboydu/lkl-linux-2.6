@@ -12,7 +12,7 @@
 
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT		12
-#define PAGE_SIZE		(1UL << PAGE_SHIFT)
+#define PAGE_SIZE		(_AC(1,UL) << PAGE_SHIFT)
 #define PAGE_MASK		(~(PAGE_SIZE-1))
 
 #ifndef __ASSEMBLY__
@@ -76,6 +76,14 @@
 # endif
 #endif
 
+#ifdef CONFIG_CPU_COPY_FA
+# ifdef _USER
+#  define MULTI_USER 1
+# else
+#  define _USER fa
+# endif
+#endif
+
 #ifdef CONFIG_CPU_SA1100
 # ifdef _USER
 #  define MULTI_USER 1
@@ -109,11 +117,12 @@
 #endif
 
 struct page;
+struct vm_area_struct;
 
 struct cpu_user_fns {
 	void (*cpu_clear_user_highpage)(struct page *page, unsigned long vaddr);
 	void (*cpu_copy_user_highpage)(struct page *to, struct page *from,
-			unsigned long vaddr);
+			unsigned long vaddr, struct vm_area_struct *vma);
 };
 
 #ifdef MULTI_USER
@@ -129,7 +138,7 @@ extern struct cpu_user_fns cpu_user;
 
 extern void __cpu_clear_user_highpage(struct page *page, unsigned long vaddr);
 extern void __cpu_copy_user_highpage(struct page *to, struct page *from,
-			unsigned long vaddr);
+			unsigned long vaddr, struct vm_area_struct *vma);
 #endif
 
 #define clear_user_highpage(page,vaddr)		\
@@ -137,7 +146,7 @@ extern void __cpu_copy_user_highpage(struct page *to, struct page *from,
 
 #define __HAVE_ARCH_COPY_USER_HIGHPAGE
 #define copy_user_highpage(to,from,vaddr,vma)	\
-	__cpu_copy_user_highpage(to, from, vaddr)
+	__cpu_copy_user_highpage(to, from, vaddr, vma)
 
 #define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
 extern void copy_page(void *to, const void *from);
@@ -186,6 +195,10 @@ typedef unsigned long pgprot_t;
 
 typedef struct page *pgtable_t;
 
+#ifndef CONFIG_SPARSEMEM
+extern int pfn_valid(unsigned long);
+#endif
+
 #include <asm/memory.h>
 
 #endif /* !__ASSEMBLY__ */
@@ -194,13 +207,6 @@ typedef struct page *pgtable_t;
 	(((current->personality & READ_IMPLIES_EXEC) ? VM_EXEC : 0) | \
 	 VM_READ | VM_WRITE | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
-/*
- * With EABI on ARMv5 and above we must have 64-bit aligned slab pointers.
- */
-#if defined(CONFIG_AEABI) && (__LINUX_ARM_ARCH__ >= 5)
-#define ARCH_SLAB_MINALIGN 8
-#endif
-
-#include <asm-generic/page.h>
+#include <asm-generic/getorder.h>
 
 #endif

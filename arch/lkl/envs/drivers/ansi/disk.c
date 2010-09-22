@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 
-#include <asm/disk.h>
+#include <asm/disk_portable.h>
 
 /*
  * FIXME: This ANSI version works with < 2GB files. Get rid of it and create

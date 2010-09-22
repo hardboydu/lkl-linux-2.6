@@ -4,10 +4,11 @@
 
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <asm/pci_x86.h>
-#include <asm/mach-default/pci-functions.h>
+#include <asm/pci-functions.h>
 
 /* BIOS32 signature: "_32_" */
 #define BIOS32_SIGNATURE	(('_' << 0) + ('3' << 8) + ('2' << 16) + ('_' << 24))
@@ -161,7 +162,7 @@ static int pci_bios_read(unsigned int seg, unsigned int bus,
 	if (!value || (bus > 255) || (devfn > 255) || (reg > 255))
 		return -EINVAL;
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	switch (len) {
 	case 1:
@@ -212,7 +213,7 @@ static int pci_bios_read(unsigned int seg, unsigned int bus,
 		break;
 	}
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return (int)((result & 0xff00) >> 8);
 }
@@ -227,7 +228,7 @@ static int pci_bios_write(unsigned int seg, unsigned int bus,
 	if ((bus > 255) || (devfn > 255) || (reg > 255)) 
 		return -EINVAL;
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	switch (len) {
 	case 1:
@@ -268,7 +269,7 @@ static int pci_bios_write(unsigned int seg, unsigned int bus,
 		break;
 	}
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return (int)((result & 0xff00) >> 8);
 }

@@ -25,6 +25,7 @@
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
+#include <linux/slab.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-chip-ident.h>
 #include <media/v4l2-i2c-drv.h>
@@ -102,15 +103,16 @@ static u8 upd64083_read(struct v4l2_subdev *sd, u8 reg)
 
 /* ------------------------------------------------------------------------ */
 
-static int upd64083_s_routing(struct v4l2_subdev *sd, const struct v4l2_routing *route)
+static int upd64083_s_routing(struct v4l2_subdev *sd,
+			      u32 input, u32 output, u32 config)
 {
 	struct upd64083_state *state = to_state(sd);
 	u8 r00, r02;
 
-	if (route->input > 7 || (route->input & 6) == 6)
+	if (input > 7 || (input & 6) == 6)
 		return -EINVAL;
-	state->mode = (route->input & 3) << 6;
-	state->ext_y_adc = (route->input & UPD64083_EXT_Y_ADC) << 3;
+	state->mode = (input & 3) << 6;
+	state->ext_y_adc = (input & UPD64083_EXT_Y_ADC) << 3;
 	r00 = (state->regs[R00] & ~(3 << 6)) | state->mode;
 	r02 = (state->regs[R02] & ~(1 << 5)) | state->ext_y_adc;
 	upd64083_write(sd, R00, r00);
@@ -162,11 +164,6 @@ static int upd64083_log_status(struct v4l2_subdev *sd)
 		      "SA04=%02x SA05=%02x SA06=%02x\n",
 		buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
 	return 0;
-}
-
-static int upd64083_command(struct i2c_client *client, unsigned cmd, void *arg)
-{
-	return v4l2_subdev_command(i2c_get_clientdata(client), cmd, arg);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -239,8 +236,6 @@ MODULE_DEVICE_TABLE(i2c, upd64083_id);
 
 static struct v4l2_i2c_driver_data v4l2_i2c_data = {
 	.name = "upd64083",
-	.driverid = I2C_DRIVERID_UPD64083,
-	.command = upd64083_command,
 	.probe = upd64083_probe,
 	.remove = upd64083_remove,
 	.id_table = upd64083_id,

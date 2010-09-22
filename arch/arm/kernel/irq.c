@@ -27,7 +27,6 @@
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/smp.h>
 #include <linux/init.h>
@@ -69,14 +68,14 @@ int show_interrupts(struct seq_file *p, void *v)
 	}
 
 	if (i < NR_IRQS) {
-		spin_lock_irqsave(&irq_desc[i].lock, flags);
+		raw_spin_lock_irqsave(&irq_desc[i].lock, flags);
 		action = irq_desc[i].action;
 		if (!action)
 			goto unlock;
 
 		seq_printf(p, "%3d: ", i);
 		for_each_present_cpu(cpu)
-			seq_printf(p, "%10u ", kstat_cpu(cpu).irqs[i]);
+			seq_printf(p, "%10u ", kstat_irqs_cpu(i, cpu));
 		seq_printf(p, " %10s", irq_desc[i].chip->name ? : "-");
 		seq_printf(p, "  %s", action->name);
 		for (action = action->next; action; action = action->next)
@@ -84,9 +83,9 @@ int show_interrupts(struct seq_file *p, void *v)
 
 		seq_putc(p, '\n');
 unlock:
-		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
+		raw_spin_unlock_irqrestore(&irq_desc[i].lock, flags);
 	} else if (i == NR_IRQS) {
-#ifdef CONFIG_ARCH_ACORN
+#ifdef CONFIG_FIQ
 		show_fiq_list(p, v);
 #endif
 #ifdef CONFIG_SMP
@@ -97,12 +96,6 @@ unlock:
 	}
 	return 0;
 }
-
-/* Handle bad interrupts */
-static struct irq_desc bad_irq_desc = {
-	.handle_irq = handle_bad_irq,
-	.lock = __SPIN_LOCK_UNLOCKED(bad_irq_desc.lock),
-};
 
 /*
  * do_IRQ handles all hardware IRQ's.  Decoded IRQs should not
@@ -119,10 +112,13 @@ asmlinkage void __exception asm_do_IRQ(unsigned int irq, struct pt_regs *regs)
 	 * Some hardware gives randomly wrong interrupts.  Rather
 	 * than crashing, do something sensible.
 	 */
-	if (irq >= NR_IRQS)
-		handle_bad_irq(irq, &bad_irq_desc);
-	else
+	if (unlikely(irq >= NR_IRQS)) {
+		if (printk_ratelimit())
+			printk(KERN_WARNING "Bad IRQ%u\n", irq);
+		ack_bad_irq(irq);
+	} else {
 		generic_handle_irq(irq);
+	}
 
 	/* AT91 specific workaround */
 	irq_finish(irq);
@@ -142,7 +138,7 @@ void set_irq_flags(unsigned int irq, unsigned int iflags)
 	}
 
 	desc = irq_desc + irq;
-	spin_lock_irqsave(&desc->lock, flags);
+	raw_spin_lock_irqsave(&desc->lock, flags);
 	desc->status |= IRQ_NOREQUEST | IRQ_NOPROBE | IRQ_NOAUTOEN;
 	if (iflags & IRQF_VALID)
 		desc->status &= ~IRQ_NOREQUEST;
@@ -150,7 +146,7 @@ void set_irq_flags(unsigned int irq, unsigned int iflags)
 		desc->status &= ~IRQ_NOPROBE;
 	if (!(iflags & IRQF_NOAUTOEN))
 		desc->status &= ~IRQ_NOAUTOEN;
-	spin_unlock_irqrestore(&desc->lock, flags);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
 }
 
 void __init init_IRQ(void)
@@ -160,10 +156,6 @@ void __init init_IRQ(void)
 	for (irq = 0; irq < NR_IRQS; irq++)
 		irq_desc[irq].status |= IRQ_NOREQUEST | IRQ_NOPROBE;
 
-#ifdef CONFIG_SMP
-	bad_irq_desc.affinity = CPU_MASK_ALL;
-	bad_irq_desc.cpu = smp_processor_id();
-#endif
 	init_arch_irq();
 }
 
@@ -171,11 +163,11 @@ void __init init_IRQ(void)
 
 static void route_irq(struct irq_desc *desc, unsigned int irq, unsigned int cpu)
 {
-	pr_debug("IRQ%u: moving from cpu%u to cpu%u\n", irq, desc->cpu, cpu);
+	pr_debug("IRQ%u: moving from cpu%u to cpu%u\n", irq, desc->node, cpu);
 
-	spin_lock_irq(&desc->lock);
+	raw_spin_lock_irq(&desc->lock);
 	desc->chip->set_affinity(irq, cpumask_of(cpu));
-	spin_unlock_irq(&desc->lock);
+	raw_spin_unlock_irq(&desc->lock);
 }
 
 /*
@@ -190,16 +182,17 @@ void migrate_irqs(void)
 	for (i = 0; i < NR_IRQS; i++) {
 		struct irq_desc *desc = irq_desc + i;
 
-		if (desc->cpu == cpu) {
-			unsigned int newcpu = any_online_cpu(desc->affinity);
-
-			if (newcpu == NR_CPUS) {
+		if (desc->node == cpu) {
+			unsigned int newcpu = cpumask_any_and(desc->affinity,
+							      cpu_online_mask);
+			if (newcpu >= nr_cpu_ids) {
 				if (printk_ratelimit())
 					printk(KERN_INFO "IRQ%u no longer affine to CPU%u\n",
 					       i, cpu);
 
-				cpus_setall(desc->affinity);
-				newcpu = any_online_cpu(desc->affinity);
+				cpumask_setall(desc->affinity);
+				newcpu = cpumask_any_and(desc->affinity,
+							 cpu_online_mask);
 			}
 
 			route_irq(desc, i, newcpu);

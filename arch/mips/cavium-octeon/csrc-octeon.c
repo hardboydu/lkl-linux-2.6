@@ -38,7 +38,7 @@ void octeon_init_cvmcount(void)
 	local_irq_restore(flags);
 }
 
-static cycle_t octeon_cvmcount_read(void)
+static cycle_t octeon_cvmcount_read(struct clocksource *cs)
 {
 	return read_c0_cvmcount();
 }
@@ -49,6 +49,38 @@ static struct clocksource clocksource_mips = {
 	.mask		= CLOCKSOURCE_MASK(64),
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 };
+
+unsigned long long notrace sched_clock(void)
+{
+	/* 64-bit arithmatic can overflow, so use 128-bit.  */
+#if (__GNUC__ < 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ <= 3))
+	u64 t1, t2, t3;
+	unsigned long long rv;
+	u64 mult = clocksource_mips.mult;
+	u64 shift = clocksource_mips.shift;
+	u64 cnt = read_c0_cvmcount();
+
+	asm (
+		"dmultu\t%[cnt],%[mult]\n\t"
+		"nor\t%[t1],$0,%[shift]\n\t"
+		"mfhi\t%[t2]\n\t"
+		"mflo\t%[t3]\n\t"
+		"dsll\t%[t2],%[t2],1\n\t"
+		"dsrlv\t%[rv],%[t3],%[shift]\n\t"
+		"dsllv\t%[t1],%[t2],%[t1]\n\t"
+		"or\t%[rv],%[t1],%[rv]\n\t"
+		: [rv] "=&r" (rv), [t1] "=&r" (t1), [t2] "=&r" (t2), [t3] "=&r" (t3)
+		: [cnt] "r" (cnt), [mult] "r" (mult), [shift] "r" (shift)
+		: "hi", "lo");
+	return rv;
+#else
+	/* GCC > 4.3 do it the easy way.  */
+	unsigned int __attribute__((mode(TI))) t;
+	t = read_c0_cvmcount();
+	t = t * clocksource_mips.mult;
+	return (unsigned long long)(t >> clocksource_mips.shift);
+#endif
+}
 
 void __init plat_time_init(void)
 {

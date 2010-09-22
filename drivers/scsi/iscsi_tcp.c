@@ -28,6 +28,7 @@
 
 #include <linux/types.h>
 #include <linux/inet.h>
+#include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/blkdev.h>
 #include <linux/crypto.h>
@@ -48,13 +49,6 @@ MODULE_AUTHOR("Mike Christie <michaelc@cs.wisc.edu>, "
 	      "Alex Aizman <itn780@yahoo.com>");
 MODULE_DESCRIPTION("iSCSI/TCP data-path");
 MODULE_LICENSE("GPL");
-#undef DEBUG_TCP
-
-#ifdef DEBUG_TCP
-#define debug_tcp(fmt...) printk(KERN_INFO "tcp: " fmt)
-#else
-#define debug_tcp(fmt...)
-#endif
 
 static struct scsi_transport_template *iscsi_sw_tcp_scsi_transport;
 static struct scsi_host_template iscsi_sw_tcp_sht;
@@ -62,6 +56,21 @@ static struct iscsi_transport iscsi_sw_tcp_transport;
 
 static unsigned int iscsi_max_lun = 512;
 module_param_named(max_lun, iscsi_max_lun, uint, S_IRUGO);
+
+static int iscsi_sw_tcp_dbg;
+module_param_named(debug_iscsi_tcp, iscsi_sw_tcp_dbg, int,
+		   S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(debug_iscsi_tcp, "Turn on debugging for iscsi_tcp module "
+		 "Set to 1 to turn on, and zero to turn off. Default is off.");
+
+#define ISCSI_SW_TCP_DBG(_conn, dbg_fmt, arg...)		\
+	do {							\
+		if (iscsi_sw_tcp_dbg)				\
+			iscsi_conn_printk(KERN_INFO, _conn,	\
+					     "%s " dbg_fmt,	\
+					     __func__, ##arg);	\
+	} while (0);
+
 
 /**
  * iscsi_sw_tcp_recv - TCP receive in sendfile fashion
@@ -77,7 +86,7 @@ static int iscsi_sw_tcp_recv(read_descriptor_t *rd_desc, struct sk_buff *skb,
 	unsigned int consumed, total_consumed = 0;
 	int status;
 
-	debug_tcp("in %d bytes\n", skb->len - offset);
+	ISCSI_SW_TCP_DBG(conn, "in %d bytes\n", skb->len - offset);
 
 	do {
 		status = 0;
@@ -86,8 +95,30 @@ static int iscsi_sw_tcp_recv(read_descriptor_t *rd_desc, struct sk_buff *skb,
 		total_consumed += consumed;
 	} while (consumed != 0 && status != ISCSI_TCP_SKB_DONE);
 
-	debug_tcp("read %d bytes status %d\n", skb->len - offset, status);
+	ISCSI_SW_TCP_DBG(conn, "read %d bytes status %d\n",
+			 skb->len - offset, status);
 	return total_consumed;
+}
+
+/**
+ * iscsi_sw_sk_state_check - check socket state
+ * @sk: socket
+ *
+ * If the socket is in CLOSE or CLOSE_WAIT we should
+ * not close the connection if there is still some
+ * data pending.
+ */
+static inline int iscsi_sw_sk_state_check(struct sock *sk)
+{
+	struct iscsi_conn *conn = (struct iscsi_conn*)sk->sk_user_data;
+
+	if ((sk->sk_state == TCP_CLOSE_WAIT || sk->sk_state == TCP_CLOSE) &&
+	    !atomic_read(&sk->sk_rmem_alloc)) {
+		ISCSI_SW_TCP_DBG(conn, "TCP_CLOSE|TCP_CLOSE_WAIT\n");
+		iscsi_conn_failure(conn, ISCSI_ERR_TCP_CONN_CLOSE);
+		return -ECONNRESET;
+	}
+	return 0;
 }
 
 static void iscsi_sw_tcp_data_ready(struct sock *sk, int flag)
@@ -107,6 +138,8 @@ static void iscsi_sw_tcp_data_ready(struct sock *sk, int flag)
 	rd_desc.arg.data = conn;
 	rd_desc.count = 1;
 	tcp_read_sock(sk, &rd_desc, iscsi_sw_tcp_recv);
+
+	iscsi_sw_sk_state_check(sk);
 
 	read_unlock(&sk->sk_callback_lock);
 
@@ -128,12 +161,7 @@ static void iscsi_sw_tcp_state_change(struct sock *sk)
 	conn = (struct iscsi_conn*)sk->sk_user_data;
 	session = conn->session;
 
-	if ((sk->sk_state == TCP_CLOSE_WAIT ||
-	     sk->sk_state == TCP_CLOSE) &&
-	    !atomic_read(&sk->sk_rmem_alloc)) {
-		debug_tcp("iscsi_tcp_state_change: TCP_CLOSE|TCP_CLOSE_WAIT\n");
-		iscsi_conn_failure(conn, ISCSI_ERR_CONN_FAILED);
-	}
+	iscsi_sw_sk_state_check(sk);
 
 	tcp_conn = conn->dd_data;
 	tcp_sw_conn = tcp_conn->dd_data;
@@ -155,8 +183,8 @@ static void iscsi_sw_tcp_write_space(struct sock *sk)
 	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
 
 	tcp_sw_conn->old_write_space(sk);
-	debug_tcp("iscsi_write_space: cid %d\n", conn->id);
-	scsi_queue_work(conn->session->host, &conn->xmitwork);
+	ISCSI_SW_TCP_DBG(conn, "iscsi_write_space\n");
+	iscsi_conn_queue_work(conn);
 }
 
 static void iscsi_sw_tcp_conn_set_callbacks(struct iscsi_conn *conn)
@@ -178,8 +206,10 @@ static void iscsi_sw_tcp_conn_set_callbacks(struct iscsi_conn *conn)
 }
 
 static void
-iscsi_sw_tcp_conn_restore_callbacks(struct iscsi_sw_tcp_conn *tcp_sw_conn)
+iscsi_sw_tcp_conn_restore_callbacks(struct iscsi_conn *conn)
 {
+	struct iscsi_tcp_conn *tcp_conn = conn->dd_data;
+	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
 	struct sock *sk = tcp_sw_conn->sock->sk;
 
 	/* restore socket callbacks, see also: iscsi_conn_set_callbacks() */
@@ -243,8 +273,6 @@ static int iscsi_sw_tcp_xmit_segment(struct iscsi_tcp_conn *tcp_conn,
 
 		if (r < 0) {
 			iscsi_tcp_segment_unmap(segment);
-			if (copied || r == -EAGAIN)
-				break;
 			return r;
 		}
 		copied += r;
@@ -265,11 +293,17 @@ static int iscsi_sw_tcp_xmit(struct iscsi_conn *conn)
 
 	while (1) {
 		rc = iscsi_sw_tcp_xmit_segment(tcp_conn, segment);
-		if (rc < 0) {
+		/*
+		 * We may not have been able to send data because the conn
+		 * is getting stopped. libiscsi will know so propogate err
+		 * for it to do the right thing.
+		 */
+		if (rc == -EAGAIN)
+			return rc;
+		else if (rc < 0) {
 			rc = ISCSI_ERR_XMIT_FAILED;
 			goto error;
-		}
-		if (rc == 0)
+		} else if (rc == 0)
 			break;
 
 		consumed += rc;
@@ -283,7 +317,7 @@ static int iscsi_sw_tcp_xmit(struct iscsi_conn *conn)
 		}
 	}
 
-	debug_tcp("xmit %d bytes\n", consumed);
+	ISCSI_SW_TCP_DBG(conn, "xmit %d bytes\n", consumed);
 
 	conn->txdata_octets += consumed;
 	return consumed;
@@ -291,7 +325,7 @@ static int iscsi_sw_tcp_xmit(struct iscsi_conn *conn)
 error:
 	/* Transmit error. We could initiate error recovery
 	 * here. */
-	debug_tcp("Error sending PDU, errno=%d\n", rc);
+	ISCSI_SW_TCP_DBG(conn, "Error sending PDU, errno=%d\n", rc);
 	iscsi_conn_failure(conn, rc);
 	return -EIO;
 }
@@ -334,9 +368,10 @@ static int iscsi_sw_tcp_send_hdr_done(struct iscsi_tcp_conn *tcp_conn,
 	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
 
 	tcp_sw_conn->out.segment = tcp_sw_conn->out.data_segment;
-	debug_tcp("Header done. Next segment size %u total_size %u\n",
-		  tcp_sw_conn->out.segment.size,
-		  tcp_sw_conn->out.segment.total_size);
+	ISCSI_SW_TCP_DBG(tcp_conn->iscsi_conn,
+			 "Header done. Next segment size %u total_size %u\n",
+			 tcp_sw_conn->out.segment.size,
+			 tcp_sw_conn->out.segment.total_size);
 	return 0;
 }
 
@@ -346,8 +381,8 @@ static void iscsi_sw_tcp_send_hdr_prep(struct iscsi_conn *conn, void *hdr,
 	struct iscsi_tcp_conn *tcp_conn = conn->dd_data;
 	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
 
-	debug_tcp("%s(%p%s)\n", __func__, tcp_conn,
-			conn->hdrdgst_en? ", digest enabled" : "");
+	ISCSI_SW_TCP_DBG(conn, "%s\n", conn->hdrdgst_en ?
+			 "digest enabled" : "digest disabled");
 
 	/* Clear the data segment - needs to be filled in by the
 	 * caller using iscsi_tcp_send_data_prep() */
@@ -389,9 +424,9 @@ iscsi_sw_tcp_send_data_prep(struct iscsi_conn *conn, struct scatterlist *sg,
 	struct hash_desc *tx_hash = NULL;
 	unsigned int hdr_spec_len;
 
-	debug_tcp("%s(%p, offset=%d, datalen=%d%s)\n", __func__,
-			tcp_conn, offset, len,
-			conn->datadgst_en? ", digest enabled" : "");
+	ISCSI_SW_TCP_DBG(conn, "offset=%d, datalen=%d %s\n", offset, len,
+			 conn->datadgst_en ?
+			 "digest enabled" : "digest disabled");
 
 	/* Make sure the datalen matches what the caller
 	   said he would send. */
@@ -415,8 +450,8 @@ iscsi_sw_tcp_send_linear_data_prep(struct iscsi_conn *conn, void *data,
 	struct hash_desc *tx_hash = NULL;
 	unsigned int hdr_spec_len;
 
-	debug_tcp("%s(%p, datalen=%d%s)\n", __func__, tcp_conn, len,
-		  conn->datadgst_en? ", digest enabled" : "");
+	ISCSI_SW_TCP_DBG(conn, "datalen=%zd %s\n", len, conn->datadgst_en ?
+			 "digest enabled" : "digest disabled");
 
 	/* Make sure the datalen matches what the caller
 	   said he would send. */
@@ -452,7 +487,7 @@ static int iscsi_sw_tcp_pdu_init(struct iscsi_task *task,
 	}
 
 	if (err) {
-		iscsi_conn_failure(conn, err);
+		/* got invalid offset/len */
 		return -EIO;
 	}
 	return 0;
@@ -522,7 +557,7 @@ static void iscsi_sw_tcp_release_conn(struct iscsi_conn *conn)
 		return;
 
 	sock_hold(sock->sk);
-	iscsi_sw_tcp_conn_restore_callbacks(tcp_sw_conn);
+	iscsi_sw_tcp_conn_restore_callbacks(conn);
 	sock_put(sock->sk);
 
 	spin_lock_bh(&session->lock);
@@ -552,9 +587,10 @@ static void iscsi_sw_tcp_conn_stop(struct iscsi_cls_conn *cls_conn, int flag)
 	struct iscsi_conn *conn = cls_conn->dd_data;
 	struct iscsi_tcp_conn *tcp_conn = conn->dd_data;
 	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
+	struct socket *sock = tcp_sw_conn->sock;
 
 	/* userspace may have goofed up and not bound us */
-	if (!tcp_sw_conn->sock)
+	if (!sock)
 		return;
 	/*
 	 * Make sure our recv side is stopped.
@@ -564,6 +600,9 @@ static void iscsi_sw_tcp_conn_stop(struct iscsi_cls_conn *cls_conn, int flag)
 	write_lock_bh(&tcp_sw_conn->sock->sk->sk_callback_lock);
 	set_bit(ISCSI_SUSPEND_BIT, &conn->suspend_rx);
 	write_unlock_bh(&tcp_sw_conn->sock->sk->sk_callback_lock);
+
+	sock->sk->sk_err = EIO;
+	wake_up_interruptible(sk_sleep(sock->sk));
 
 	iscsi_conn_stop(cls_conn, flag);
 	iscsi_sw_tcp_release_conn(conn);
@@ -754,8 +793,7 @@ iscsi_sw_tcp_conn_get_stats(struct iscsi_cls_conn *cls_conn,
 
 static struct iscsi_cls_session *
 iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
-			    uint16_t qdepth, uint32_t initial_cmdsn,
-			    uint32_t *hostno)
+			    uint16_t qdepth, uint32_t initial_cmdsn)
 {
 	struct iscsi_cls_session *cls_session;
 	struct iscsi_session *session;
@@ -766,10 +804,11 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 		return NULL;
 	}
 
-	shost = iscsi_host_alloc(&iscsi_sw_tcp_sht, 0, qdepth);
+	shost = iscsi_host_alloc(&iscsi_sw_tcp_sht, 0, 1);
 	if (!shost)
 		return NULL;
 	shost->transportt = iscsi_sw_tcp_scsi_transport;
+	shost->cmd_per_lun = qdepth;
 	shost->max_lun = iscsi_max_lun;
 	shost->max_id = 0;
 	shost->max_channel = 0;
@@ -777,10 +816,9 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 
 	if (iscsi_host_add(shost, NULL))
 		goto free_host;
-	*hostno = shost->host_no;
 
 	cls_session = iscsi_session_setup(&iscsi_sw_tcp_transport, shost,
-					  cmds_max,
+					  cmds_max, 0,
 					  sizeof(struct iscsi_tcp_task) +
 					  sizeof(struct iscsi_sw_tcp_hdrbuf),
 					  initial_cmdsn, 0);
@@ -813,6 +851,12 @@ static void iscsi_sw_tcp_session_destroy(struct iscsi_cls_session *cls_session)
 	iscsi_host_free(shost);
 }
 
+static int iscsi_sw_tcp_slave_alloc(struct scsi_device *sdev)
+{
+	set_bit(QUEUE_FLAG_BIDI, &sdev->request_queue->queue_flags);
+	return 0;
+}
+
 static int iscsi_sw_tcp_slave_configure(struct scsi_device *sdev)
 {
 	blk_queue_bounce_limit(sdev->request_queue, BLK_BOUNCE_ANY);
@@ -831,9 +875,11 @@ static struct scsi_host_template iscsi_sw_tcp_sht = {
 	.cmd_per_lun		= ISCSI_DEF_CMD_PER_LUN,
 	.eh_abort_handler       = iscsi_eh_abort,
 	.eh_device_reset_handler= iscsi_eh_device_reset,
-	.eh_target_reset_handler= iscsi_eh_target_reset,
+	.eh_target_reset_handler = iscsi_eh_recover_target,
 	.use_clustering         = DISABLE_CLUSTERING,
+	.slave_alloc            = iscsi_sw_tcp_slave_alloc,
 	.slave_configure        = iscsi_sw_tcp_slave_configure,
+	.target_alloc		= iscsi_target_alloc,
 	.proc_name		= "iscsi_tcp",
 	.this_id		= -1,
 };
@@ -864,7 +910,7 @@ static struct iscsi_transport iscsi_sw_tcp_transport = {
 				  ISCSI_USERNAME | ISCSI_PASSWORD |
 				  ISCSI_USERNAME_IN | ISCSI_PASSWORD_IN |
 				  ISCSI_FAST_ABORT | ISCSI_ABORT_TMO |
-				  ISCSI_LU_RESET_TMO |
+				  ISCSI_LU_RESET_TMO | ISCSI_TGT_RESET_TMO |
 				  ISCSI_PING_TMO | ISCSI_RECV_TMO |
 				  ISCSI_IFACE_NAME | ISCSI_INITIATOR_NAME,
 	.host_param_mask	= ISCSI_HOST_HWADDRESS | ISCSI_HOST_IPADDRESS |

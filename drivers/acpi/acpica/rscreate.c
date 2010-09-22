@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2010, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -182,7 +182,7 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 
 	/*
 	 * Loop through the ACPI_INTERNAL_OBJECTS - Each object should be a
-	 * package that in turn contains an acpi_integer Address, a u8 Pin,
+	 * package that in turn contains an u64 Address, a u8 Pin,
 	 * a Name, and a u8 source_index.
 	 */
 	top_object_list = package_object->package.elements;
@@ -191,8 +191,6 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 	user_prt = ACPI_CAST_PTR(struct acpi_pci_routing_table, buffer);
 
 	for (index = 0; index < number_of_elements; index++) {
-		int source_name_index = 2;
-		int source_index_index = 3;
 
 		/*
 		 * Point user_prt past this current structure
@@ -212,9 +210,9 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 
 		/* Each element of the top-level package must also be a package */
 
-		if (ACPI_GET_OBJECT_TYPE(*top_object_list) != ACPI_TYPE_PACKAGE) {
+		if ((*top_object_list)->common.type != ACPI_TYPE_PACKAGE) {
 			ACPI_ERROR((AE_INFO,
-				    "(PRT[%X]) Need sub-package, found %s",
+				    "(PRT[%u]) Need sub-package, found %s",
 				    index,
 				    acpi_ut_get_object_type_name
 				    (*top_object_list)));
@@ -225,7 +223,7 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 
 		if ((*top_object_list)->package.count != 4) {
 			ACPI_ERROR((AE_INFO,
-				    "(PRT[%X]) Need package of length 4, found length %d",
+				    "(PRT[%u]) Need package of length 4, found length %u",
 				    index, (*top_object_list)->package.count));
 			return_ACPI_STATUS(AE_AML_PACKAGE_LIMIT);
 		}
@@ -240,9 +238,9 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 		/* 1) First subobject: Dereference the PRT.Address */
 
 		obj_desc = sub_object_list[0];
-		if (ACPI_GET_OBJECT_TYPE(obj_desc) != ACPI_TYPE_INTEGER) {
+		if (obj_desc->common.type != ACPI_TYPE_INTEGER) {
 			ACPI_ERROR((AE_INFO,
-				    "(PRT[%X].Address) Need Integer, found %s",
+				    "(PRT[%u].Address) Need Integer, found %s",
 				    index,
 				    acpi_ut_get_object_type_name(obj_desc)));
 			return_ACPI_STATUS(AE_BAD_DATA);
@@ -253,33 +251,12 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 		/* 2) Second subobject: Dereference the PRT.Pin */
 
 		obj_desc = sub_object_list[1];
-		if (ACPI_GET_OBJECT_TYPE(obj_desc) != ACPI_TYPE_INTEGER) {
+		if (obj_desc->common.type != ACPI_TYPE_INTEGER) {
 			ACPI_ERROR((AE_INFO,
-				    "(PRT[%X].Pin) Need Integer, found %s",
+				    "(PRT[%u].Pin) Need Integer, found %s",
 				    index,
 				    acpi_ut_get_object_type_name(obj_desc)));
 			return_ACPI_STATUS(AE_BAD_DATA);
-		}
-
-		/*
-		 * If BIOS erroneously reversed the _PRT source_name and source_index,
-		 * then reverse them back.
-		 */
-		if (ACPI_GET_OBJECT_TYPE(sub_object_list[3]) !=
-		    ACPI_TYPE_INTEGER) {
-			if (acpi_gbl_enable_interpreter_slack) {
-				source_name_index = 3;
-				source_index_index = 2;
-				printk(KERN_WARNING
-				       "ACPI: Handling Garbled _PRT entry\n");
-			} else {
-				ACPI_ERROR((AE_INFO,
-					    "(PRT[%X].source_index) Need Integer, found %s",
-					    index,
-					    acpi_ut_get_object_type_name
-					    (sub_object_list[3])));
-				return_ACPI_STATUS(AE_BAD_DATA);
-			}
 		}
 
 		user_prt->pin = (u32) obj_desc->integer.value;
@@ -291,8 +268,7 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 		 * other ACPI implementations.
 		 */
 		obj_desc = sub_object_list[3];
-		if (!obj_desc
-		    || (ACPI_GET_OBJECT_TYPE(obj_desc) != ACPI_TYPE_INTEGER)) {
+		if (!obj_desc || (obj_desc->common.type != ACPI_TYPE_INTEGER)) {
 			sub_object_list[3] = sub_object_list[2];
 			sub_object_list[2] = obj_desc;
 
@@ -305,15 +281,15 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 		 * 3) Third subobject: Dereference the PRT.source_name
 		 * The name may be unresolved (slack mode), so allow a null object
 		 */
-		obj_desc = sub_object_list[source_name_index];
+		obj_desc = sub_object_list[2];
 		if (obj_desc) {
-			switch (ACPI_GET_OBJECT_TYPE(obj_desc)) {
+			switch (obj_desc->common.type) {
 			case ACPI_TYPE_LOCAL_REFERENCE:
 
 				if (obj_desc->reference.class !=
 				    ACPI_REFCLASS_NAME) {
 					ACPI_ERROR((AE_INFO,
-						    "(PRT[%X].Source) Need name, found Reference Class %X",
+						    "(PRT[%u].Source) Need name, found Reference Class 0x%X",
 						    index,
 						    obj_desc->reference.class));
 					return_ACPI_STATUS(AE_BAD_DATA);
@@ -364,7 +340,7 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 			default:
 
 				ACPI_ERROR((AE_INFO,
-					    "(PRT[%X].Source) Need Ref/String/Integer, found %s",
+					    "(PRT[%u].Source) Need Ref/String/Integer, found %s",
 					    index,
 					    acpi_ut_get_object_type_name
 					    (obj_desc)));
@@ -379,10 +355,10 @@ acpi_rs_create_pci_routing_table(union acpi_operand_object *package_object,
 
 		/* 4) Fourth subobject: Dereference the PRT.source_index */
 
-		obj_desc = sub_object_list[source_index_index];
-		if (ACPI_GET_OBJECT_TYPE(obj_desc) != ACPI_TYPE_INTEGER) {
+		obj_desc = sub_object_list[3];
+		if (obj_desc->common.type != ACPI_TYPE_INTEGER) {
 			ACPI_ERROR((AE_INFO,
-				    "(PRT[%X].SourceIndex) Need Integer, found %s",
+				    "(PRT[%u].SourceIndex) Need Integer, found %s",
 				    index,
 				    acpi_ut_get_object_type_name(obj_desc)));
 			return_ACPI_STATUS(AE_BAD_DATA);

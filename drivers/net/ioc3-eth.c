@@ -44,6 +44,7 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 
 #ifdef CONFIG_SERIAL_8250
 #include <linux/serial_core.h>
@@ -530,7 +531,7 @@ static void ioc3_tcpudp_checksum(struct sk_buff *skb, uint32_t hwsum, int len)
 	 *   case where the checksum is right the higher layers will still
 	 *   drop the packet as appropriate.
 	 */
-	if (eh->h_proto != ntohs(ETH_P_IP))
+	if (eh->h_proto != htons(ETH_P_IP))
 		return;
 
 	ih = (struct iphdr *) ((char *)eh + ETH_HLEN);
@@ -1214,6 +1215,19 @@ static void __devinit ioc3_serial_probe(struct pci_dev *pdev, struct ioc3 *ioc3)
 }
 #endif
 
+static const struct net_device_ops ioc3_netdev_ops = {
+	.ndo_open		= ioc3_open,
+	.ndo_stop		= ioc3_close,
+	.ndo_start_xmit		= ioc3_start_xmit,
+	.ndo_tx_timeout		= ioc3_timeout,
+	.ndo_get_stats		= ioc3_get_stats,
+	.ndo_set_multicast_list	= ioc3_set_multicast_list,
+	.ndo_do_ioctl		= ioc3_ioctl,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= ioc3_set_mac_address,
+	.ndo_change_mtu		= eth_change_mtu,
+};
+
 static int __devinit ioc3_probe(struct pci_dev *pdev,
 	const struct pci_device_id *ent)
 {
@@ -1226,17 +1240,17 @@ static int __devinit ioc3_probe(struct pci_dev *pdev,
 	int err, pci_using_dac;
 
 	/* Configure DMA attributes. */
-	err = pci_set_dma_mask(pdev, DMA_64BIT_MASK);
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
 	if (!err) {
 		pci_using_dac = 1;
-		err = pci_set_consistent_dma_mask(pdev, DMA_64BIT_MASK);
+		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 		if (err < 0) {
 			printk(KERN_ERR "%s: Unable to obtain 64 bit DMA "
 			       "for consistent allocations\n", pci_name(pdev));
 			goto out;
 		}
 	} else {
-		err = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+		err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (err) {
 			printk(KERN_ERR "%s: No usable DMA configuration, "
 			       "aborting.\n", pci_name(pdev));
@@ -1310,15 +1324,8 @@ static int __devinit ioc3_probe(struct pci_dev *pdev,
 	ioc3_get_eaddr(ip);
 
 	/* The IOC3-specific entries in the device structure. */
-	dev->open		= ioc3_open;
-	dev->hard_start_xmit	= ioc3_start_xmit;
-	dev->tx_timeout		= ioc3_timeout;
 	dev->watchdog_timeo	= 5 * HZ;
-	dev->stop		= ioc3_close;
-	dev->get_stats		= ioc3_get_stats;
-	dev->do_ioctl		= ioc3_ioctl;
-	dev->set_multicast_list	= ioc3_set_multicast_list;
-	dev->set_mac_address	= ioc3_set_mac_address;
+	dev->netdev_ops		= &ioc3_netdev_ops;
 	dev->ethtool_ops	= &ioc3_ethtool_ops;
 	dev->features		= NETIF_F_IP_CSUM;
 
@@ -1377,7 +1384,7 @@ static void __devexit ioc3_remove_one (struct pci_dev *pdev)
 	 */
 }
 
-static struct pci_device_id ioc3_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(ioc3_pci_tbl) = {
 	{ PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC3, PCI_ANY_ID, PCI_ANY_ID },
 	{ 0 }
 };
@@ -1496,7 +1503,6 @@ static int ioc3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	BARRIER();
 
-	dev->trans_start = jiffies;
 	ip->tx_skbs[produce] = skb;			/* Remember skb */
 	produce = (produce + 1) & 127;
 	ip->tx_pi = produce;
@@ -1509,7 +1515,7 @@ static int ioc3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_unlock_irq(&ip->ioc3_lock);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void ioc3_timeout(struct net_device *dev)
@@ -1658,11 +1664,10 @@ static int ioc3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 static void ioc3_set_multicast_list(struct net_device *dev)
 {
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct netdev_hw_addr *ha;
 	struct ioc3_private *ip = netdev_priv(dev);
 	struct ioc3 *ioc3 = ip->regs;
 	u64 ehar = 0;
-	int i;
 
 	netif_stop_queue(dev);				/* Lock out others. */
 
@@ -1675,16 +1680,16 @@ static void ioc3_set_multicast_list(struct net_device *dev)
 		ioc3_w_emcr(ip->emcr);			/* Clear promiscuous. */
 		(void) ioc3_r_emcr();
 
-		if ((dev->flags & IFF_ALLMULTI) || (dev->mc_count > 64)) {
+		if ((dev->flags & IFF_ALLMULTI) ||
+		    (netdev_mc_count(dev) > 64)) {
 			/* Too many for hashing to make sense or we want all
 			   multicast packets anyway,  so skip computing all the
 			   hashes and just accept all packets.  */
 			ip->ehar_h = 0xffffffff;
 			ip->ehar_l = 0xffffffff;
 		} else {
-			for (i = 0; i < dev->mc_count; i++) {
-				char *addr = dmi->dmi_addr;
-				dmi = dmi->next;
+			netdev_for_each_mc_addr(ha, dev) {
+				char *addr = ha->addr;
 
 				if (!(*addr & 1))
 					continue;

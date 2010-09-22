@@ -10,7 +10,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/utsrelease.h>
+#include <generated/utsrelease.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -46,7 +46,6 @@
 #include <asm/io.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
 #include <asm/pgtable.h>
 #endif
 

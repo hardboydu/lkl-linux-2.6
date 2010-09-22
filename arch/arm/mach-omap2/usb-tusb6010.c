@@ -16,8 +16,8 @@
 
 #include <linux/usb/musb.h>
 
-#include <mach/gpmc.h>
-#include <mach/mux.h>
+#include <plat/gpmc.h>
+#include <plat/mux.h>
 
 
 static u8		async_cs, sync_cs;
@@ -187,7 +187,7 @@ int tusb6010_platform_retime(unsigned is_refclk)
 	unsigned	sysclk_ps;
 	int		status;
 
-	if (!refclk_psec)
+	if (!refclk_psec || fclk_ps == 0)
 		return -ENODEV;
 
 	sysclk_ps = is_refclk ? refclk_psec : TUSB6010_OSCCLK_60;

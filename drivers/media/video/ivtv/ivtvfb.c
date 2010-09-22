@@ -42,6 +42,7 @@
 #include <linux/kernel.h>
 #include <linux/fb.h>
 #include <linux/ivtvfb.h>
+#include <linux/slab.h>
 
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
@@ -298,7 +299,8 @@ static int ivtvfb_prep_dec_dma_to_device(struct ivtv *itv,
 	prepare_to_wait(&itv->dma_waitq, &wait, TASK_INTERRUPTIBLE);
 	/* if no UDMA is pending and no UDMA is in progress, then the DMA
 	   is finished */
-	while (itv->i_flags & (IVTV_F_I_UDMA_PENDING | IVTV_F_I_UDMA)) {
+	while (test_bit(IVTV_F_I_UDMA_PENDING, &itv->i_flags) ||
+	       test_bit(IVTV_F_I_UDMA, &itv->i_flags)) {
 		/* don't interrupt if the DMA is in progress but break off
 		   a still pending DMA. */
 		got_sig = signal_pending(current);
@@ -458,7 +460,7 @@ static int ivtvfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long ar
 
 			vblank.flags = FB_VBLANK_HAVE_COUNT |FB_VBLANK_HAVE_VCOUNT |
 					FB_VBLANK_HAVE_VSYNC;
-			trace = read_reg(0x028c0) >> 16;
+			trace = read_reg(IVTV_REG_DEC_LINE_FIELD) >> 16;
 			if (itv->is_50hz && trace > 312)
 				trace -= 312;
 			else if (itv->is_60hz && trace > 262)
@@ -1064,7 +1066,11 @@ static int ivtvfb_init_io(struct ivtv *itv)
 	}
 	mutex_unlock(&itv->serialize_lock);
 
-	ivtvfb_get_framebuffer(itv, &oi->video_rbase, &oi->video_buffer_size);
+	if (ivtvfb_get_framebuffer(itv, &oi->video_rbase,
+					&oi->video_buffer_size) < 0) {
+		IVTVFB_ERR("Firmware failed to respond\n");
+		return -EIO;
+	}
 
 	/* The osd buffer size depends on the number of video buffers allocated
 	   on the PVR350 itself. For now we'll hardcode the smallest osd buffer
@@ -1156,8 +1162,11 @@ static int ivtvfb_init_card(struct ivtv *itv)
 	}
 
 	/* Find & setup the OSD buffer */
-	if ((rc = ivtvfb_init_io(itv)))
+	rc = ivtvfb_init_io(itv);
+	if (rc) {
+		ivtvfb_release_buffers(itv);
 		return rc;
+	}
 
 	/* Set the startup video mode information */
 	if ((rc = ivtvfb_init_vidmode(itv))) {
@@ -1192,12 +1201,12 @@ static int ivtvfb_init_card(struct ivtv *itv)
 static int __init ivtvfb_callback_init(struct device *dev, void *p)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(dev);
-	struct ivtv *itv = container_of(v4l2_dev, struct ivtv, device);
+	struct ivtv *itv = container_of(v4l2_dev, struct ivtv, v4l2_dev);
 
 	if (itv && (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT)) {
 		if (ivtvfb_init_card(itv) == 0) {
 			IVTVFB_INFO("Framebuffer registered on %s\n",
-					itv->device.name);
+					itv->v4l2_dev.name);
 			(*(int *)p)++;
 		}
 	}
@@ -1207,7 +1216,8 @@ static int __init ivtvfb_callback_init(struct device *dev, void *p)
 static int ivtvfb_callback_cleanup(struct device *dev, void *p)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(dev);
-	struct ivtv *itv = container_of(v4l2_dev, struct ivtv, device);
+	struct ivtv *itv = container_of(v4l2_dev, struct ivtv, v4l2_dev);
+	struct osd_info *oi = itv->osd_info;
 
 	if (itv && (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT)) {
 		if (unregister_framebuffer(&itv->osd_info->ivtvfb_info)) {
@@ -1216,7 +1226,7 @@ static int ivtvfb_callback_cleanup(struct device *dev, void *p)
 			return 0;
 		}
 		IVTVFB_INFO("Unregister framebuffer %d\n", itv->instance);
-		ivtvfb_blank(FB_BLANK_POWERDOWN, &itv->osd_info->ivtvfb_info);
+		ivtvfb_blank(FB_BLANK_VSYNC_SUSPEND, &oi->ivtvfb_info);
 		ivtvfb_release_buffers(itv);
 		itv->osd_video_pbase = 0;
 	}

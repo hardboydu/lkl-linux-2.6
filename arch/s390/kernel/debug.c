@@ -18,6 +18,7 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/ctype.h>
+#include <linux/string.h>
 #include <linux/sysctl.h>
 #include <asm/uaccess.h>
 #include <linux/module.h>
@@ -62,8 +63,6 @@ typedef struct
 	long args[0];
 } debug_sprintf_entry_t;
 
-
-extern void tod_to_timeval(uint64_t todval, struct timespec *xtime);
 
 /* internal function prototyes */
 
@@ -603,7 +602,7 @@ debug_input(struct file *file, const char __user *user_buf, size_t length,
 static int
 debug_open(struct inode *inode, struct file *file)
 {
-	int i = 0, rc = 0;
+	int i, rc = 0;
 	file_private_info_t *p_info;
 	debug_info_t *debug_info, *debug_info_snapshot;
 
@@ -642,8 +641,7 @@ found:
 	p_info = kmalloc(sizeof(file_private_info_t),
 						GFP_KERNEL);
 	if(!p_info){
-		if(debug_info_snapshot)
-			debug_info_free(debug_info_snapshot);
+		debug_info_free(debug_info_snapshot);
 		rc = -ENOMEM;
 		goto out;
 	}
@@ -657,6 +655,7 @@ found:
 	p_info->act_entry_offset = 0;
 	file->private_data = p_info;
 	debug_info_get(debug_info);
+	nonseekable_open(inode, file);
 out:
 	mutex_unlock(&debug_mutex);
 	return rc;
@@ -698,8 +697,7 @@ debug_info_t *debug_register_mode(const char *name, int pages_per_area,
 	if ((uid != 0) || (gid != 0))
 		pr_warning("Root becomes the owner of all s390dbf files "
 			   "in sysfs\n");
-	if (!initialized)
-		BUG();
+	BUG_ON(!initialized);
 	mutex_lock(&debug_mutex);
 
         /* create new debug_info */
@@ -885,11 +883,11 @@ static int debug_active=1;
  * if debug_active is already off
  */
 static int
-s390dbf_procactive(ctl_table *table, int write, struct file *filp,
+s390dbf_procactive(ctl_table *table, int write,
                      void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	if (!write || debug_stoppable || !debug_active)
-		return proc_dointvec(table, write, filp, buffer, lenp, ppos);
+		return proc_dointvec(table, write, buffer, lenp, ppos);
 	else
 		return 0;
 }
@@ -897,35 +895,30 @@ s390dbf_procactive(ctl_table *table, int write, struct file *filp,
 
 static struct ctl_table s390dbf_table[] = {
 	{
-		.ctl_name       = CTL_S390DBF_STOPPABLE,
 		.procname       = "debug_stoppable",
 		.data		= &debug_stoppable,
 		.maxlen		= sizeof(int),
 		.mode           = S_IRUGO | S_IWUSR,
-		.proc_handler   = &proc_dointvec,
-		.strategy	= &sysctl_intvec,
+		.proc_handler   = proc_dointvec,
 	},
 	 {
-		.ctl_name       = CTL_S390DBF_ACTIVE,
 		.procname       = "debug_active",
 		.data		= &debug_active,
 		.maxlen		= sizeof(int),
 		.mode           = S_IRUGO | S_IWUSR,
-		.proc_handler   = &s390dbf_procactive,
-		.strategy	= &sysctl_intvec,
+		.proc_handler   = s390dbf_procactive,
 	},
-	{ .ctl_name = 0 }
+	{ }
 };
 
 static struct ctl_table s390dbf_dir_table[] = {
 	{
-		.ctl_name       = CTL_S390DBF,
 		.procname       = "s390dbf",
 		.maxlen         = 0,
 		.mode           = S_IRUGO | S_IXUGO,
 		.child          = s390dbf_table,
 	},
-	{ .ctl_name = 0 }
+	{ }
 };
 
 static struct ctl_table_header *s390dbf_sysctl_header;
@@ -1156,7 +1149,6 @@ debug_unregister_view(debug_info_t * id, struct debug_view *view)
 	else {
 		debugfs_remove(id->debugfs_entries[i]);
 		id->views[i] = NULL;
-		rc = 0;
 	}
 	spin_unlock_irqrestore(&id->lock, flags);
 out:
@@ -1188,7 +1180,7 @@ debug_get_uint(char *buf)
 {
 	int rc;
 
-	for(; isspace(*buf); buf++);
+	buf = skip_spaces(buf);
 	rc = simple_strtoul(buf, &buf, 10);
 	if(*buf){
 		rc = -EINVAL;
@@ -1453,17 +1445,13 @@ debug_dflt_header_fn(debug_info_t * id, struct debug_view *view,
 			 int area, debug_entry_t * entry, char *out_buf)
 {
 	struct timespec time_spec;
-	unsigned long long time;
 	char *except_str;
 	unsigned long caller;
 	int rc = 0;
 	unsigned int level;
 
 	level = entry->id.fields.level;
-	time = entry->id.stck;
-	/* adjust todclock to 1970 */
-	time -= 0x8126d60e46000000LL - (0x3c26700LL * 1000000 * 4096);
-	tod_to_timeval(time, &time_spec);
+	stck_to_timespec(entry->id.stck, &time_spec);
 
 	if (entry->id.fields.exception)
 		except_str = "*";

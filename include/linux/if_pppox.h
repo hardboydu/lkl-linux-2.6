@@ -72,6 +72,15 @@ struct sockaddr_pppol2tp {
 	struct pppol2tp_addr pppol2tp;
 }__attribute__ ((packed));
 
+/* The L2TPv3 protocol changes tunnel and session ids from 16 to 32
+ * bits. So we need a different sockaddr structure.
+ */
+struct sockaddr_pppol2tpv3 {
+	sa_family_t     sa_family;      /* address family, AF_PPPOX */
+	unsigned int    sa_protocol;    /* protocol identifier */
+	struct pppol2tpv3_addr pppol2tp;
+} __attribute__ ((packed));
+
 /*********************************************************************
  *
  * ioctl interface for defining forwarding of connections
@@ -95,16 +104,16 @@ struct pppoe_tag {
 } __attribute ((packed));
 
 /* Tag identifiers */
-#define PTT_EOL		__constant_htons(0x0000)
-#define PTT_SRV_NAME	__constant_htons(0x0101)
-#define PTT_AC_NAME	__constant_htons(0x0102)
-#define PTT_HOST_UNIQ	__constant_htons(0x0103)
-#define PTT_AC_COOKIE	__constant_htons(0x0104)
-#define PTT_VENDOR 	__constant_htons(0x0105)
-#define PTT_RELAY_SID	__constant_htons(0x0110)
-#define PTT_SRV_ERR     __constant_htons(0x0201)
-#define PTT_SYS_ERR  	__constant_htons(0x0202)
-#define PTT_GEN_ERR  	__constant_htons(0x0203)
+#define PTT_EOL		__cpu_to_be16(0x0000)
+#define PTT_SRV_NAME	__cpu_to_be16(0x0101)
+#define PTT_AC_NAME	__cpu_to_be16(0x0102)
+#define PTT_HOST_UNIQ	__cpu_to_be16(0x0103)
+#define PTT_AC_COOKIE	__cpu_to_be16(0x0104)
+#define PTT_VENDOR 	__cpu_to_be16(0x0105)
+#define PTT_RELAY_SID	__cpu_to_be16(0x0110)
+#define PTT_SRV_ERR     __cpu_to_be16(0x0201)
+#define PTT_SYS_ERR  	__cpu_to_be16(0x0202)
+#define PTT_GEN_ERR  	__cpu_to_be16(0x0203)
 
 struct pppoe_hdr {
 #if defined(__LITTLE_ENDIAN_BITFIELD)

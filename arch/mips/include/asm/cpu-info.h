@@ -39,8 +39,8 @@ struct cache_desc {
 #define MIPS_CACHE_PINDEX	0x00000020	/* Physically indexed cache */
 
 struct cpuinfo_mips {
-	unsigned long		udelay_val;
-	unsigned long		asid_cache;
+	unsigned int		udelay_val;
+	unsigned int		asid_cache;
 
 	/*
 	 * Capability and feature descriptor structure for MIPS CPU
@@ -58,6 +58,9 @@ struct cpuinfo_mips {
 	struct cache_desc	tcache;	/* Tertiary/split secondary cache */
 	int			srsets;	/* Shadow register sets */
 	int			core;	/* physical core number */
+#ifdef CONFIG_64BIT
+	int			vmbits;	/* Virtual memory size in bits */
+#endif
 #if defined(CONFIG_MIPS_MT_SMP) || defined(CONFIG_MIPS_MT_SMTC)
 	/*
 	 * In the MIPS MT "SMTC" model, each TC is considered

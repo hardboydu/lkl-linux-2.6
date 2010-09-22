@@ -22,6 +22,7 @@
 #include <linux/fs.h>
 #include <linux/security.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <acpi/acpi.h>
 #include "tpm.h"
 
@@ -212,7 +213,8 @@ static int get_event_name(char *dest, struct tcpa_event *event,
 			unsigned char * event_entry)
 {
 	const char *name = "";
-	char data[40] = "";
+	/* 41 so there is room for 40 data and 1 nul */
+	char data[41] = "";
 	int i, n_len = 0, d_len = 0;
 	struct tcpa_pc_event *pc_event;
 
@@ -342,14 +344,14 @@ static int tpm_ascii_bios_measurements_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static struct seq_operations tpm_ascii_b_measurments_seqops = {
+static const struct seq_operations tpm_ascii_b_measurments_seqops = {
 	.start = tpm_bios_measurements_start,
 	.next = tpm_bios_measurements_next,
 	.stop = tpm_bios_measurements_stop,
 	.show = tpm_ascii_bios_measurements_show,
 };
 
-static struct seq_operations tpm_binary_b_measurments_seqops = {
+static const struct seq_operations tpm_binary_b_measurments_seqops = {
 	.start = tpm_bios_measurements_start,
 	.next = tpm_bios_measurements_next,
 	.stop = tpm_bios_measurements_stop,

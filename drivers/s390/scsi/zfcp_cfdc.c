@@ -4,14 +4,16 @@
  * Userspace interface for accessing the
  * Access Control Lists / Control File Data Channel
  *
- * Copyright IBM Corporation 2008
+ * Copyright IBM Corporation 2008, 2009
  */
 
 #define KMSG_COMPONENT "zfcp"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/miscdevice.h>
+#include <asm/compat.h>
 #include <asm/ccwdev.h>
 #include "zfcp_def.h"
 #include "zfcp_ext.h"
@@ -86,8 +88,18 @@ static int zfcp_cfdc_copy_to_user(void __user  *user_buffer,
 static struct zfcp_adapter *zfcp_cfdc_get_adapter(u32 devno)
 {
 	char busid[9];
+	struct ccw_device *cdev;
+	struct zfcp_adapter *adapter;
+
 	snprintf(busid, sizeof(busid), "0.0.%04x", devno);
-	return zfcp_get_adapter_by_busid(busid);
+	cdev = get_ccwdev_by_busid(&zfcp_ccw_driver, busid);
+	if (!cdev)
+		return NULL;
+
+	adapter = zfcp_ccw_adapter_by_cdev(cdev);
+
+	put_device(&cdev->dev);
+	return adapter;
 }
 
 static int zfcp_cfdc_set_fsf(struct zfcp_fsf_cfdc *fsf_cfdc, int command)
@@ -153,7 +165,7 @@ static void zfcp_cfdc_req_to_sense(struct zfcp_cfdc_data *data,
 }
 
 static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
-				unsigned long buffer)
+				unsigned long arg)
 {
 	struct zfcp_cfdc_data *data;
 	struct zfcp_cfdc_data __user *data_user;
@@ -165,7 +177,11 @@ static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
 	if (command != ZFCP_CFDC_IOC)
 		return -ENOTTY;
 
-	data_user = (void __user *) buffer;
+	if (is_compat_task())
+		data_user = compat_ptr(arg);
+	else
+		data_user = (void __user *)arg;
+
 	if (!data_user)
 		return -EINVAL;
 
@@ -229,7 +245,7 @@ static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
  free_sg:
 	zfcp_sg_free_table(fsf_cfdc->sg, ZFCP_CFDC_PAGES);
  adapter_put:
-	zfcp_adapter_put(adapter);
+	zfcp_ccw_adapter_put(adapter);
  free_buffer:
 	kfree(data);
  no_mem_sense:
@@ -238,6 +254,7 @@ static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
 }
 
 static const struct file_operations zfcp_cfdc_fops = {
+	.open = nonseekable_open,
 	.unlocked_ioctl = zfcp_cfdc_dev_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = zfcp_cfdc_dev_ioctl

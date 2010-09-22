@@ -4,7 +4,7 @@
  *  Derived from cx25840-core.h
  *
  *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
- *  Copyright (C) 2008  Andy Walls <awalls@radix.net>
+ *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
  *
  *  This program is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU General Public License
@@ -24,6 +24,8 @@
 
 #ifndef _CX18_AV_CORE_H_
 #define _CX18_AV_CORE_H_
+
+#include <media/v4l2-device.h>
 
 struct cx18;
 
@@ -59,6 +61,25 @@ enum cx18_av_video_input {
 	CX18_AV_SVIDEO2 = 0x620,
 	CX18_AV_SVIDEO3 = 0x730,
 	CX18_AV_SVIDEO4 = 0x840,
+
+	/* Component Video inputs consist of one luma input (In1-In8) ORed
+	   with a red chroma (In4-In6) and blue chroma input (In7-In8) */
+	CX18_AV_COMPONENT_LUMA1 = 0x1000,
+	CX18_AV_COMPONENT_LUMA2 = 0x2000,
+	CX18_AV_COMPONENT_LUMA3 = 0x3000,
+	CX18_AV_COMPONENT_LUMA4 = 0x4000,
+	CX18_AV_COMPONENT_LUMA5 = 0x5000,
+	CX18_AV_COMPONENT_LUMA6 = 0x6000,
+	CX18_AV_COMPONENT_LUMA7 = 0x7000,
+	CX18_AV_COMPONENT_LUMA8 = 0x8000,
+	CX18_AV_COMPONENT_R_CHROMA4 = 0x40000,
+	CX18_AV_COMPONENT_R_CHROMA5 = 0x50000,
+	CX18_AV_COMPONENT_R_CHROMA6 = 0x60000,
+	CX18_AV_COMPONENT_B_CHROMA7 = 0x700000,
+	CX18_AV_COMPONENT_B_CHROMA8 = 0x800000,
+
+	/* Component Video aliases for common combinations */
+	CX18_AV_COMPONENT1 = 0x861000,
 };
 
 enum cx18_av_audio_input {
@@ -73,17 +94,40 @@ enum cx18_av_audio_input {
 };
 
 struct cx18_av_state {
+	struct v4l2_subdev sd;
 	int radio;
 	v4l2_std_id std;
 	enum cx18_av_video_input vid_input;
 	enum cx18_av_audio_input aud_input;
 	u32 audclk_freq;
 	int audmode;
-	int vbi_line_offset;
 	int default_volume;
 	u32 id;
 	u32 rev;
 	int is_initialized;
+
+	/*
+	 * The VBI slicer starts operating and counting lines, begining at
+	 * slicer line count of 1, at D lines after the deassertion of VRESET.
+	 * This staring field line, S, is 6 (& 319) or 10 (& 273) for 625 or 525
+	 * line systems respectively.  Sliced ancillary data captured on VBI
+	 * slicer line M is inserted after the VBI slicer is done with line M,
+	 * when VBI slicer line count is N = M+1.  Thus when the VBI slicer
+	 * reports a VBI slicer line number with ancillary data, the IDID0 byte
+	 * indicates VBI slicer line N.  The actual field line that the captured
+	 * data comes from is
+	 *
+	 * L = M+(S+D-1) = N-1+(S+D-1) = N + (S+D-2).
+	 *
+	 * L is the line in the field, not frame, from which the VBI data came.
+	 * N is the line reported by the slicer in the ancillary data.
+	 * D is the slicer_line_delay value programmed into register 0x47f.
+	 * S is 6 for 625 line systems or 10 for 525 line systems
+	 * (S+D-2) is the slicer_line_offset used to convert slicer reported
+	 * line counts to actual field lines.
+	 */
+	int slicer_line_delay;
+	int slicer_line_offset;
 };
 
 
@@ -269,7 +313,7 @@ struct cx18_av_state {
 #define CXADEC_QAM_CONST_DEC       0x924
 #define CXADEC_QAM_ROTATOR_FREQ    0x948
 
-/* Bit defintions / settings used in Mako Audio */
+/* Bit definitions / settings used in Mako Audio */
 #define CXADEC_PREF_MODE_MONO_LANGA        0
 #define CXADEC_PREF_MODE_MONO_LANGB        1
 #define CXADEC_PREF_MODE_MONO_LANGC        2
@@ -298,6 +342,11 @@ struct cx18_av_state {
 #define CXADEC_SELECT_AUDIO_STANDARD_FM    0xF9  /* FM radio */
 #define CXADEC_SELECT_AUDIO_STANDARD_AUTO  0xFF  /* Auto detect */
 
+static inline struct cx18_av_state *to_cx18_av_state(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct cx18_av_state, sd);
+}
+
 /* ----------------------------------------------------------------------- */
 /* cx18_av-core.c 							   */
 int cx18_av_write(struct cx18 *cx, u16 addr, u8 value);
@@ -310,8 +359,9 @@ u8 cx18_av_read(struct cx18 *cx, u16 addr);
 u32 cx18_av_read4(struct cx18 *cx, u16 addr);
 int cx18_av_and_or(struct cx18 *cx, u16 addr, unsigned mask, u8 value);
 int cx18_av_and_or4(struct cx18 *cx, u16 addr, u32 mask, u32 value);
-int cx18_av_cmd(struct cx18 *cx, unsigned int cmd, void *arg);
 void cx18_av_std_setup(struct cx18 *cx);
+
+int cx18_av_probe(struct cx18 *cx);
 
 /* ----------------------------------------------------------------------- */
 /* cx18_av-firmware.c                                                      */
@@ -319,11 +369,17 @@ int cx18_av_loadfw(struct cx18 *cx);
 
 /* ----------------------------------------------------------------------- */
 /* cx18_av-audio.c                                                         */
-int cx18_av_audio(struct cx18 *cx, unsigned int cmd, void *arg);
+int cx18_av_audio_g_ctrl(struct cx18 *cx, struct v4l2_control *ctrl);
+int cx18_av_audio_s_ctrl(struct cx18 *cx, struct v4l2_control *ctrl);
+int cx18_av_s_clock_freq(struct v4l2_subdev *sd, u32 freq);
 void cx18_av_audio_set_path(struct cx18 *cx);
 
 /* ----------------------------------------------------------------------- */
 /* cx18_av-vbi.c                                                           */
-int cx18_av_vbi(struct cx18 *cx, unsigned int cmd, void *arg);
+int cx18_av_decode_vbi_line(struct v4l2_subdev *sd,
+			   struct v4l2_decode_vbi_line *vbi);
+int cx18_av_s_raw_fmt(struct v4l2_subdev *sd, struct v4l2_vbi_format *fmt);
+int cx18_av_g_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_format *fmt);
+int cx18_av_s_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_format *fmt);
 
 #endif

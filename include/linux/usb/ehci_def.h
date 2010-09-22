@@ -45,7 +45,7 @@ struct ehci_caps {
 #define HCC_CANPARK(p)		((p)&(1 << 2))  /* true: can park on async qh */
 #define HCC_PGM_FRAMELISTLEN(p) ((p)&(1 << 1))  /* true: periodic_size changes*/
 #define HCC_64BIT_ADDR(p)       ((p)&(1))       /* true: can use 64-bit addr */
-	u8		portroute [8];	 /* nibbles for routing - offset 0xC */
+	u8		portroute[8];	 /* nibbles for routing - offset 0xC */
 } __attribute__ ((packed));
 
 
@@ -92,19 +92,20 @@ struct ehci_regs {
 	/* ASYNCLISTADDR: offset 0x18 */
 	u32		async_next;	/* address of next async queue head */
 
-	u32		reserved [9];
+	u32		reserved[9];
 
 	/* CONFIGFLAG: offset 0x40 */
 	u32		configured_flag;
 #define FLAG_CF		(1<<0)		/* true: we'll support "high speed" */
 
 	/* PORTSC: offset 0x44 */
-	u32		port_status [0];	/* up to N_PORTS */
+	u32		port_status[0];	/* up to N_PORTS */
 /* 31:23 reserved */
 #define PORT_WKOC_E	(1<<22)		/* wake on overcurrent (enable) */
 #define PORT_WKDISC_E	(1<<21)		/* wake on disconnect (enable) */
 #define PORT_WKCONN_E	(1<<20)		/* wake on connect (enable) */
 /* 19:16 for port testing */
+#define PORT_TEST_PKT	(0x4<<16)	/* Port Test Control - packet test */
 #define PORT_LED_OFF	(0<<14)
 #define PORT_LED_AMBER	(1<<14)
 #define PORT_LED_GREEN	(2<<14)
@@ -132,6 +133,19 @@ struct ehci_regs {
 #define USBMODE_CM_HC	(3<<0)		/* host controller mode */
 #define USBMODE_CM_IDLE	(0<<0)		/* idle state */
 
+/* Moorestown has some non-standard registers, partially due to the fact that
+ * its EHCI controller has both TT and LPM support. HOSTPCx are extentions to
+ * PORTSCx
+ */
+#define HOSTPC0		0x84		/* HOSTPC extension */
+#define HOSTPC_PHCD	(1<<22)		/* Phy clock disable */
+#define HOSTPC_PSPD	(3<<25)		/* Port speed detection */
+#define USBMODE_EX	0xc8		/* USB Device mode extension */
+#define USBMODE_EX_VBPS	(1<<5)		/* VBus Power Select On */
+#define USBMODE_EX_HC	(3<<0)		/* host controller mode */
+#define TXFILLTUNING	0x24		/* TX FIFO Tuning register */
+#define TXFIFO_DEFAULT	(8<<16)		/* FIFO burst threshold 8 */
+
 /* Appendix C, Debug port ... intended for use with special "debug devices"
  * that can help if there's no serial console.  (nonstandard enumeration.)
  */
@@ -156,5 +170,26 @@ struct ehci_dbg_port {
 	u32	address;
 #define DBGP_EPADDR(dev, ep)	(((dev)<<8)|(ep))
 } __attribute__ ((packed));
+
+#ifdef CONFIG_EARLY_PRINTK_DBGP
+#include <linux/init.h>
+extern int __init early_dbgp_init(char *s);
+extern struct console early_dbgp_console;
+#endif /* CONFIG_EARLY_PRINTK_DBGP */
+
+#ifdef CONFIG_EARLY_PRINTK_DBGP
+/* Call backs from ehci host driver to ehci debug driver */
+extern int dbgp_external_startup(void);
+extern int dbgp_reset_prep(void);
+#else
+static inline int dbgp_reset_prep(void)
+{
+	return 1;
+}
+static inline int dbgp_external_startup(void)
+{
+	return -1;
+}
+#endif
 
 #endif /* __LINUX_USB_EHCI_DEF_H */

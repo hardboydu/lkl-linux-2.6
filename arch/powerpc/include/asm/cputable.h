@@ -70,8 +70,10 @@ struct pt_regs;
 extern int machine_check_generic(struct pt_regs *regs);
 extern int machine_check_4xx(struct pt_regs *regs);
 extern int machine_check_440A(struct pt_regs *regs);
+extern int machine_check_e500mc(struct pt_regs *regs);
 extern int machine_check_e500(struct pt_regs *regs);
 extern int machine_check_e200(struct pt_regs *regs);
+extern int machine_check_47x(struct pt_regs *regs);
 
 /* NOTE WELL: Update identify_cpu() if fields are added or removed! */
 struct cpu_spec {
@@ -145,6 +147,7 @@ extern const char *powerpc_base_platform;
 #define CPU_FTR_USE_TB			ASM_CONST(0x0000000000000040)
 #define CPU_FTR_L2CSR			ASM_CONST(0x0000000000000080)
 #define CPU_FTR_601			ASM_CONST(0x0000000000000100)
+#define CPU_FTR_DBELL			ASM_CONST(0x0000000000000200)
 #define CPU_FTR_CAN_NAP			ASM_CONST(0x0000000000000400)
 #define CPU_FTR_L3CR			ASM_CONST(0x0000000000000800)
 #define CPU_FTR_L3_DISABLE_NAP		ASM_CONST(0x0000000000001000)
@@ -364,6 +367,7 @@ extern const char *powerpc_base_platform;
 #define CPU_FTRS_44X	(CPU_FTR_USE_TB | CPU_FTR_NODSISRALIGN | CPU_FTR_NOEXECUTE)
 #define CPU_FTRS_440x6	(CPU_FTR_USE_TB | CPU_FTR_NODSISRALIGN | CPU_FTR_NOEXECUTE | \
 	    CPU_FTR_INDEXED_DCR)
+#define CPU_FTRS_47X	(CPU_FTRS_440x6)
 #define CPU_FTRS_E200	(CPU_FTR_USE_TB | CPU_FTR_SPE_COMP | \
 	    CPU_FTR_NODSISRALIGN | CPU_FTR_COHERENT_ICACHE | \
 	    CPU_FTR_UNIFIED_ID_CACHE | CPU_FTR_NOEXECUTE)
@@ -375,13 +379,14 @@ extern const char *powerpc_base_platform;
 	    CPU_FTR_NODSISRALIGN | CPU_FTR_NOEXECUTE)
 #define CPU_FTRS_E500MC	(CPU_FTR_MAYBE_CAN_DOZE | CPU_FTR_USE_TB | \
 	    CPU_FTR_MAYBE_CAN_NAP | CPU_FTR_NODSISRALIGN | \
-	    CPU_FTR_L2CSR | CPU_FTR_LWSYNC | CPU_FTR_NOEXECUTE)
+	    CPU_FTR_L2CSR | CPU_FTR_LWSYNC | CPU_FTR_NOEXECUTE | \
+	    CPU_FTR_DBELL)
 #define CPU_FTRS_GENERIC_32	(CPU_FTR_COMMON | CPU_FTR_NODSISRALIGN)
 
 /* 64-bit CPUs */
-#define CPU_FTRS_POWER3	(CPU_FTR_USE_TB | CPU_FTR_LWSYNC | \
+#define CPU_FTRS_POWER3	(CPU_FTR_USE_TB | \
 	    CPU_FTR_IABR | CPU_FTR_PPC_LE)
-#define CPU_FTRS_RS64	(CPU_FTR_USE_TB | CPU_FTR_LWSYNC | \
+#define CPU_FTRS_RS64	(CPU_FTR_USE_TB | \
 	    CPU_FTR_IABR | \
 	    CPU_FTR_MMCRA | CPU_FTR_CTRL)
 #define CPU_FTRS_POWER4	(CPU_FTR_USE_TB | CPU_FTR_LWSYNC | \
@@ -450,6 +455,9 @@ enum {
 #endif
 #ifdef CONFIG_44x
 	    CPU_FTRS_44X | CPU_FTRS_440x6 |
+#endif
+#ifdef CONFIG_PPC_47x
+	    CPU_FTRS_47X |
 #endif
 #ifdef CONFIG_E200
 	    CPU_FTRS_E200 |

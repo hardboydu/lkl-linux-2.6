@@ -9,6 +9,8 @@ _ENV+=$(if $(CONFIG_LKL_ENV_NT),nt)
 _ENV+=$(if $(CONFIG_LKL_ENV_NTK),ntk)
 _ENV+=$(if $(CONFIG_LKL_ENV_APR),apr)
 _ENV+=$(if $(CONFIG_LKL_ENV_LINUX),linux)
+_ENV+=$(if $(CONFIG_LKL_ENV_HAIKU_USER),posix)
+_ENV+=$(if $(CONFIG_LKL_ENV_HAIKU_KERNEL),khaiku)
 ENV=$(strip $(_ENV))
 
 
@@ -21,4 +23,6 @@ LIB_OBJS=$(patsubst $(srctree)/$(src)/lib/%.c,$(obj)/lib/%.o,$(LIB))
 lkl.a: $(patsubst %,$(obj)/%.o,$(ENV)) $(DRV_OBJS) $(LIB_OBJS)
 	$(CROSS_COMPILE)ar -rc $@ $^
 
+lkl.o: $(patsubst %,$(obj)/%.o,$(ENV)) $(DRV_OBJS) $(LIB_OBJS) vmlinux
+	$(CROSS_COMPILE)ld -r -o $@ $^
 

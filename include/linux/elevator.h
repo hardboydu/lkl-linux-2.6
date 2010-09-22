@@ -14,6 +14,9 @@ typedef void (elevator_merged_fn) (struct request_queue *, struct request *, int
 
 typedef int (elevator_allow_merge_fn) (struct request_queue *, struct request *, struct bio *);
 
+typedef void (elevator_bio_merged_fn) (struct request_queue *,
+						struct request *, struct bio *);
+
 typedef int (elevator_dispatch_fn) (struct request_queue *, int);
 
 typedef void (elevator_add_req_fn) (struct request_queue *, struct request *);
@@ -36,6 +39,7 @@ struct elevator_ops
 	elevator_merged_fn *elevator_merged_fn;
 	elevator_merge_req_fn *elevator_merge_req_fn;
 	elevator_allow_merge_fn *elevator_allow_merge_fn;
+	elevator_bio_merged_fn *elevator_bio_merged_fn;
 
 	elevator_dispatch_fn *elevator_dispatch_fn;
 	elevator_add_req_fn *elevator_add_req_fn;
@@ -103,10 +107,10 @@ extern int elv_merge(struct request_queue *, struct request **, struct bio *);
 extern void elv_merge_requests(struct request_queue *, struct request *,
 			       struct request *);
 extern void elv_merged_request(struct request_queue *, struct request *, int);
-extern void elv_dequeue_request(struct request_queue *, struct request *);
+extern void elv_bio_merged(struct request_queue *q, struct request *,
+				struct bio *);
 extern void elv_requeue_request(struct request_queue *, struct request *);
 extern int elv_queue_empty(struct request_queue *);
-extern struct request *elv_next_request(struct request_queue *q);
 extern struct request *elv_former_request(struct request_queue *, struct request *);
 extern struct request *elv_latter_request(struct request_queue *, struct request *);
 extern int elv_register_queue(struct request_queue *q);
@@ -116,6 +120,7 @@ extern void elv_abort_queue(struct request_queue *);
 extern void elv_completed_request(struct request_queue *, struct request *);
 extern int elv_set_request(struct request_queue *, struct request *, gfp_t);
 extern void elv_put_request(struct request_queue *, struct request *);
+extern void elv_drain_elevator(struct request_queue *);
 
 /*
  * io scheduler registration
@@ -170,7 +175,7 @@ enum {
 	ELV_MQUEUE_MUST,
 };
 
-#define rq_end_sector(rq)	((rq)->sector + (rq)->nr_sectors)
+#define rq_end_sector(rq)	(blk_rq_pos(rq) + blk_rq_sectors(rq))
 #define rb_entry_rq(node)	rb_entry((node), struct request, rb_node)
 
 /*

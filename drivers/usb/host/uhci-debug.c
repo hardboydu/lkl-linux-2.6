@@ -9,6 +9,7 @@
  * (C) Copyright 1999-2001 Johannes Erdfelt
  */
 
+#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/debugfs.h>
 #include <linux/smp_lock.h>
@@ -118,7 +119,9 @@ static int uhci_show_urbp(struct urb_priv *urbp, char *buf, int len, int space)
 	}
 
 	out += sprintf(out, "%s%s", ptype, (urbp->fsbr ? " FSBR" : ""));
-	out += sprintf(out, " Actlen=%d", urbp->urb->actual_length);
+	out += sprintf(out, " Actlen=%d%s", urbp->urb->actual_length,
+			(urbp->qh->type == USB_ENDPOINT_XFER_CONTROL ?
+				"-8" : ""));
 
 	if (urbp->urb->unlinked)
 		out += sprintf(out, " Unlinked=%d", urbp->urb->unlinked);

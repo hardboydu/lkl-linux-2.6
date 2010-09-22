@@ -137,7 +137,7 @@ const struct address_space_operations hfsplus_aops = {
 	.writepages	= hfsplus_writepages,
 };
 
-struct dentry_operations hfsplus_dentry_operations = {
+const struct dentry_operations hfsplus_dentry_operations = {
 	.d_hash       = hfsplus_hash_dentry,
 	.d_compare    = hfsplus_compare_dentry,
 };
@@ -285,7 +285,7 @@ static const struct file_operations hfsplus_file_operations = {
 	.fsync		= file_fsync,
 	.open		= hfsplus_file_open,
 	.release	= hfsplus_file_release,
-	.ioctl          = hfsplus_ioctl,
+	.unlocked_ioctl = hfsplus_ioctl,
 };
 
 struct inode *hfsplus_new_inode(struct super_block *sb, int mode)

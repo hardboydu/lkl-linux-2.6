@@ -74,6 +74,7 @@ char *zconf_curname(void);
 
 /* confdata.c */
 const char *conf_get_configname(void);
+const char *conf_get_autoconfig_name(void);
 char *conf_get_default_confname(void);
 void sym_set_change_count(int count);
 void sym_add_change_count(int count);
@@ -83,7 +84,7 @@ void conf_set_all_new_symbols(enum conf_def_mode mode);
 void kconfig_load(void);
 
 /* menu.c */
-void menu_init(void);
+void _menu_init(void);
 void menu_warn(struct menu *menu, const char *fmt, ...);
 struct menu *menu_add_menu(void);
 void menu_end_menu(void);
@@ -105,6 +106,11 @@ int file_write_dep(const char *name);
 struct gstr {
 	size_t len;
 	char  *s;
+	/*
+	* when max_width is not zero long lines in string s (if any) get
+	* wrapped not to exceed the max_width value
+	*/
+	int max_width;
 };
 struct gstr str_new(void);
 struct gstr str_assign(const char *s);

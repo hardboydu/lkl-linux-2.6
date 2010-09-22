@@ -43,7 +43,7 @@
 #define HCI_NOTIFY_CONN_DEL		2
 #define HCI_NOTIFY_VOICE_SETTING	3
 
-/* HCI device types */
+/* HCI bus types */
 #define HCI_VIRTUAL	0
 #define HCI_USB		1
 #define HCI_PCCARD	2
@@ -51,6 +51,10 @@
 #define HCI_RS232	4
 #define HCI_PCI		5
 #define HCI_SDIO	6
+
+/* HCI controller types */
+#define HCI_BREDR	0x00
+#define HCI_80211	0x01
 
 /* HCI device quirks */
 enum {
@@ -101,6 +105,7 @@ enum {
 /* HCI timeouts */
 #define HCI_CONNECT_TIMEOUT	(40000)	/* 40 seconds */
 #define HCI_DISCONN_TIMEOUT	(2000)	/* 2 seconds */
+#define HCI_PAIRING_TIMEOUT	(60000)	/* 60 seconds */
 #define HCI_IDLE_TIMEOUT	(6000)	/* 6 seconds */
 #define HCI_INIT_TIMEOUT	(10000)	/* 10 seconds */
 
@@ -133,8 +138,13 @@ enum {
 #define ESCO_EV3	0x0008
 #define ESCO_EV4	0x0010
 #define ESCO_EV5	0x0020
+#define ESCO_2EV3	0x0040
+#define ESCO_3EV3	0x0080
+#define ESCO_2EV5	0x0100
+#define ESCO_3EV5	0x0200
 
 #define SCO_ESCO_MASK  (ESCO_HV1 | ESCO_HV2 | ESCO_HV3)
+#define EDR_ESCO_MASK  (ESCO_2EV3 | ESCO_3EV3 | ESCO_2EV5 | ESCO_3EV5)
 
 /* ACL flags */
 #define ACL_CONT		0x01
@@ -176,6 +186,9 @@ enum {
 #define LMP_EV5		0x02
 
 #define LMP_SNIFF_SUBR	0x02
+#define LMP_EDR_ESCO_2M	0x20
+#define LMP_EDR_ESCO_3M	0x40
+#define LMP_EDR_3S_ESCO	0x80
 
 #define LMP_SIMPLE_PAIR	0x08
 

@@ -143,7 +143,7 @@ static char *aac_get_status_string(u32 status);
  */
 
 static int nondasd = -1;
-static int aac_cache;
+static int aac_cache = 2;	/* WCE=0 to avoid performance problems */
 static int dacmode = -1;
 int aac_msi;
 int aac_commit = -1;
@@ -157,7 +157,7 @@ module_param_named(cache, aac_cache, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(cache, "Disable Queue Flush commands:\n"
 	"\tbit 0 - Disable FUA in WRITE SCSI commands\n"
 	"\tbit 1 - Disable SYNCHRONIZE_CACHE SCSI command\n"
-	"\tbit 2 - Disable only if Battery not protecting Cache");
+	"\tbit 2 - Disable only if Battery is protecting Cache");
 module_param(dacmode, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(dacmode, "Control whether dma addressing is using 64 bit DAC."
 	" 0=off, 1=on");
@@ -216,6 +216,14 @@ MODULE_PARM_DESC(expose_physicals, "Expose physical components of the arrays."
 int aac_reset_devices;
 module_param_named(reset_devices, aac_reset_devices, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(reset_devices, "Force an adapter reset at initialization.");
+
+int aac_wwn = 1;
+module_param_named(wwn, aac_wwn, int, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(wwn, "Select a WWN type for the arrays:\n"
+	"\t0 - Disable\n"
+	"\t1 - Array Meta Data Signature (default)\n"
+	"\t2 - Adapter Serial Number");
+
 
 static inline int aac_valid_context(struct scsi_cmnd *scsicmd,
 		struct fib *fibptr) {
@@ -285,7 +293,10 @@ int aac_get_config_status(struct aac_dev *dev, int commit_flag)
 			status = -EINVAL;
 		}
 	}
-	aac_fib_complete(fibptr);
+	/* Do not set XferState to zero unless receives a response from F/W */
+	if (status >= 0)
+		aac_fib_complete(fibptr);
+
 	/* Send a CT_COMMIT_CONFIG to enable discovery of devices */
 	if (status >= 0) {
 		if ((aac_commit == 1) || commit_flag) {
@@ -302,14 +313,29 @@ int aac_get_config_status(struct aac_dev *dev, int commit_flag)
 				    FsaNormal,
 				    1, 1,
 				    NULL, NULL);
-			aac_fib_complete(fibptr);
+			/* Do not set XferState to zero unless
+			 * receives a response from F/W */
+			if (status >= 0)
+				aac_fib_complete(fibptr);
 		} else if (aac_commit == 0) {
 			printk(KERN_WARNING
 			  "aac_get_config_status: Foreign device configurations are being ignored\n");
 		}
 	}
-	aac_fib_free(fibptr);
+	/* FIB should be freed only after getting the response from the F/W */
+	if (status != -ERESTARTSYS)
+		aac_fib_free(fibptr);
 	return status;
+}
+
+static void aac_expose_phy_device(struct scsi_cmnd *scsicmd)
+{
+	char inq_data;
+	scsi_sg_copy_to_buffer(scsicmd,  &inq_data, sizeof(inq_data));
+	if ((inq_data & 0x20) && (inq_data & 0x1f) == TYPE_DISK) {
+		inq_data &= 0xdf;
+		scsi_sg_copy_from_buffer(scsicmd, &inq_data, sizeof(inq_data));
+	}
 }
 
 /**
@@ -347,7 +373,9 @@ int aac_get_containers(struct aac_dev *dev)
 		maximum_num_containers = le32_to_cpu(dresp->ContainerSwitchEntries);
 		aac_fib_complete(fibptr);
 	}
-	aac_fib_free(fibptr);
+	/* FIB should be freed only after getting the response from the F/W */
+	if (status != -ERESTARTSYS)
+		aac_fib_free(fibptr);
 
 	if (maximum_num_containers < MAXIMUM_NUM_CONTAINERS)
 		maximum_num_containers = MAXIMUM_NUM_CONTAINERS;
@@ -1206,9 +1234,8 @@ static int aac_scsi_32(struct fib * fib, struct scsi_cmnd * cmd)
 
 static int aac_scsi_32_64(struct fib * fib, struct scsi_cmnd * cmd)
 {
-	if ((sizeof(dma_addr_t) > 4) &&
-	 (num_physpages > (0xFFFFFFFFULL >> PAGE_SHIFT)) &&
-	 (fib->dev->adapter_info.options & AAC_OPT_SGMAP_HOST64))
+	if ((sizeof(dma_addr_t) > 4) && fib->dev->needs_dac &&
+	    (fib->dev->adapter_info.options & AAC_OPT_SGMAP_HOST64))
 		return FAILED;
 	return aac_scsi_32(fib, cmd);
 }
@@ -1238,8 +1265,12 @@ int aac_get_adapter_info(struct aac_dev* dev)
 			 NULL);
 
 	if (rcode < 0) {
-		aac_fib_complete(fibptr);
-		aac_fib_free(fibptr);
+		/* FIB should be freed only after
+		 * getting the response from the F/W */
+		if (rcode != -ERESTARTSYS) {
+			aac_fib_complete(fibptr);
+			aac_fib_free(fibptr);
+		}
 		return rcode;
 	}
 	memcpy(&dev->adapter_info, info, sizeof(*info));
@@ -1263,6 +1294,12 @@ int aac_get_adapter_info(struct aac_dev* dev)
 
 		if (rcode >= 0)
 			memcpy(&dev->supplement_adapter_info, sinfo, sizeof(*sinfo));
+		if (rcode == -ERESTARTSYS) {
+			fibptr = aac_fib_alloc(dev);
+			if (!fibptr)
+				return -ENOMEM;
+		}
+
 	}
 
 
@@ -1371,8 +1408,11 @@ int aac_get_adapter_info(struct aac_dev* dev)
 	if (dev->nondasd_support && !dev->in_reset)
 		printk(KERN_INFO "%s%d: Non-DASD support enabled.\n",dev->name, dev->id);
 
+	if (dma_get_required_mask(&dev->pdev->dev) > DMA_BIT_MASK(32))
+		dev->needs_dac = 1;
 	dev->dac_support = 0;
-	if( (sizeof(dma_addr_t) > 4) && (dev->adapter_info.options & AAC_OPT_SGMAP_HOST64)){
+	if ((sizeof(dma_addr_t) > 4) && dev->needs_dac &&
+	    (dev->adapter_info.options & AAC_OPT_SGMAP_HOST64)) {
 		if (!dev->in_reset)
 			printk(KERN_INFO "%s%d: 64bit support enabled.\n",
 				dev->name, dev->id);
@@ -1382,14 +1422,23 @@ int aac_get_adapter_info(struct aac_dev* dev)
 	if(dacmode != -1) {
 		dev->dac_support = (dacmode!=0);
 	}
+
+	/* avoid problems with AAC_QUIRK_SCSI_32 controllers */
+	if (dev->dac_support &&	(aac_get_driver_ident(dev->cardtype)->quirks
+		& AAC_QUIRK_SCSI_32)) {
+		dev->nondasd_support = 0;
+		dev->jbod = 0;
+		expose_physicals = 0;
+	}
+
 	if(dev->dac_support != 0) {
-		if (!pci_set_dma_mask(dev->pdev, DMA_64BIT_MASK) &&
-			!pci_set_consistent_dma_mask(dev->pdev, DMA_64BIT_MASK)) {
+		if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(64)) &&
+			!pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(64))) {
 			if (!dev->in_reset)
 				printk(KERN_INFO"%s%d: 64 Bit DAC enabled\n",
 					dev->name, dev->id);
-		} else if (!pci_set_dma_mask(dev->pdev, DMA_32BIT_MASK) &&
-			!pci_set_consistent_dma_mask(dev->pdev, DMA_32BIT_MASK)) {
+		} else if (!pci_set_dma_mask(dev->pdev, DMA_BIT_MASK(32)) &&
+			!pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(32))) {
 			printk(KERN_INFO"%s%d: DMA mask set failed, 64 Bit DAC disabled\n",
 				dev->name, dev->id);
 			dev->dac_support = 0;
@@ -1451,9 +1500,11 @@ int aac_get_adapter_info(struct aac_dev* dev)
 			  (dev->scsi_host_ptr->sg_tablesize * 8) + 112;
 		}
 	}
-
-	aac_fib_complete(fibptr);
-	aac_fib_free(fibptr);
+	/* FIB should be freed only after getting the response from the F/W */
+	if (rcode != -ERESTARTSYS) {
+		aac_fib_complete(fibptr);
+		aac_fib_free(fibptr);
+	}
 
 	return rcode;
 }
@@ -1557,6 +1608,7 @@ static int aac_read(struct scsi_cmnd * scsicmd)
 	int status;
 	struct aac_dev *dev;
 	struct fib * cmd_fibcontext;
+	int cid;
 
 	dev = (struct aac_dev *)scsicmd->device->host->hostdata;
 	/*
@@ -1606,6 +1658,22 @@ static int aac_read(struct scsi_cmnd * scsicmd)
 		count = (scsicmd->cmnd[7] << 8) | scsicmd->cmnd[8];
 		break;
 	}
+
+	if ((lba + count) > (dev->fsa_dev[scmd_id(scsicmd)].size)) {
+		cid = scmd_id(scsicmd);
+		dprintk((KERN_DEBUG "aacraid: Illegal lba\n"));
+		scsicmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8 |
+			SAM_STAT_CHECK_CONDITION;
+		set_sense(&dev->fsa_dev[cid].sense_data,
+			  HARDWARE_ERROR, SENCODE_INTERNAL_TARGET_FAILURE,
+			  ASENCODE_INTERNAL_TARGET_FAILURE, 0, 0);
+		memcpy(scsicmd->sense_buffer, &dev->fsa_dev[cid].sense_data,
+		       min_t(size_t, sizeof(dev->fsa_dev[cid].sense_data),
+			     SCSI_SENSE_BUFFERSIZE));
+		scsicmd->scsi_done(scsicmd);
+		return 1;
+	}
+
 	dprintk((KERN_DEBUG "aac_read[cpu %d]: lba = %llu, t = %ld.\n",
 	  smp_processor_id(), (unsigned long long)lba, jiffies));
 	if (aac_adapter_bounds(dev,scsicmd,lba))
@@ -1614,6 +1682,7 @@ static int aac_read(struct scsi_cmnd * scsicmd)
 	 *	Alocate and initialize a Fib
 	 */
 	if (!(cmd_fibcontext = aac_fib_alloc(dev))) {
+		printk(KERN_WARNING "aac_read: fib allocation failed\n");
 		return -1;
 	}
 
@@ -1646,6 +1715,7 @@ static int aac_write(struct scsi_cmnd * scsicmd)
 	int status;
 	struct aac_dev *dev;
 	struct fib * cmd_fibcontext;
+	int cid;
 
 	dev = (struct aac_dev *)scsicmd->device->host->hostdata;
 	/*
@@ -1685,6 +1755,22 @@ static int aac_write(struct scsi_cmnd * scsicmd)
 		count = (scsicmd->cmnd[7] << 8) | scsicmd->cmnd[8];
 		fua = scsicmd->cmnd[1] & 0x8;
 	}
+
+	if ((lba + count) > (dev->fsa_dev[scmd_id(scsicmd)].size)) {
+		cid = scmd_id(scsicmd);
+		dprintk((KERN_DEBUG "aacraid: Illegal lba\n"));
+		scsicmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8 |
+			SAM_STAT_CHECK_CONDITION;
+		set_sense(&dev->fsa_dev[cid].sense_data,
+			  HARDWARE_ERROR, SENCODE_INTERNAL_TARGET_FAILURE,
+			  ASENCODE_INTERNAL_TARGET_FAILURE, 0, 0);
+		memcpy(scsicmd->sense_buffer, &dev->fsa_dev[cid].sense_data,
+		       min_t(size_t, sizeof(dev->fsa_dev[cid].sense_data),
+			     SCSI_SENSE_BUFFERSIZE));
+		scsicmd->scsi_done(scsicmd);
+		return 1;
+	}
+
 	dprintk((KERN_DEBUG "aac_write[cpu %d]: lba = %llu, t = %ld.\n",
 	  smp_processor_id(), (unsigned long long)lba, jiffies));
 	if (aac_adapter_bounds(dev,scsicmd,lba))
@@ -1693,9 +1779,14 @@ static int aac_write(struct scsi_cmnd * scsicmd)
 	 *	Allocate and initialize a Fib then setup a BlockWrite command
 	 */
 	if (!(cmd_fibcontext = aac_fib_alloc(dev))) {
-		scsicmd->result = DID_ERROR << 16;
-		scsicmd->scsi_done(scsicmd);
-		return 0;
+		/* FIB temporarily unavailable,not catastrophic failure */
+
+		/* scsicmd->result = DID_ERROR << 16;
+		 * scsicmd->scsi_done(scsicmd);
+		 * return 0;
+		 */
+		printk(KERN_WARNING "aac_write: fib allocation failed\n");
+		return -1;
 	}
 
 	status = aac_adapter_write(cmd_fibcontext, scsicmd, lba, count, fua);
@@ -2058,7 +2149,7 @@ int aac_scsi_cmd(struct scsi_cmnd * scsicmd)
 		dprintk((KERN_DEBUG "INQUIRY command, ID: %d.\n", cid));
 		memset(&inq_data, 0, sizeof (struct inquiry_data));
 
-		if (scsicmd->cmnd[1] & 0x1) {
+		if ((scsicmd->cmnd[1] & 0x1) && aac_wwn) {
 			char *arr = (char *)&inq_data;
 
 			/* EVPD bit set */
@@ -2081,7 +2172,12 @@ int aac_scsi_cmd(struct scsi_cmnd * scsicmd)
 				arr[1] = scsicmd->cmnd[2];
 				scsi_sg_copy_from_buffer(scsicmd, &inq_data,
 							 sizeof(inq_data));
-				return aac_get_container_serial(scsicmd);
+				if (aac_wwn != 2)
+					return aac_get_container_serial(
+						scsicmd);
+				/* SLES 10 SP1 special */
+				scsicmd->result = DID_OK << 16 |
+				  COMMAND_COMPLETE << 8 | SAM_STAT_GOOD;
 			} else {
 				/* vpd page not implemented */
 				scsicmd->result = DID_OK << 16 |
@@ -2521,6 +2617,11 @@ static void aac_srb_callback(void *context, struct fib * fibptr)
 
 	scsi_dma_unmap(scsicmd);
 
+	/* expose physical device if expose_physicald flag is on */
+	if (scsicmd->cmnd[0] == INQUIRY && !(scsicmd->cmnd[1] & 0x01)
+	  && expose_physicals > 0)
+		aac_expose_phy_device(scsicmd);
+
 	/*
 	 * First check the fib status
 	 */
@@ -2626,8 +2727,22 @@ static void aac_srb_callback(void *context, struct fib * fibptr)
 			scsicmd->cmnd[0],
 			le32_to_cpu(srbreply->scsi_status));
 #endif
-		scsicmd->result = DID_ERROR << 16 | COMMAND_COMPLETE << 8;
-		break;
+		if ((scsicmd->cmnd[0] == ATA_12)
+		  || (scsicmd->cmnd[0] == ATA_16)) {
+			if (scsicmd->cmnd[2] & (0x01 << 5)) {
+				scsicmd->result = DID_OK << 16
+						| COMMAND_COMPLETE << 8;
+				break;
+			} else {
+				scsicmd->result = DID_ERROR << 16
+						| COMMAND_COMPLETE << 8;
+				break;
+			}
+		} else {
+			scsicmd->result = DID_ERROR << 16
+					| COMMAND_COMPLETE << 8;
+			break;
+		}
 	}
 	if (le32_to_cpu(srbreply->scsi_status) == SAM_STAT_CHECK_CONDITION) {
 		int len;

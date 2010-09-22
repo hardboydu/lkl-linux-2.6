@@ -188,7 +188,7 @@ extern const struct address_space_operations hfs_btree_aops;
 
 extern struct inode *hfs_new_inode(struct inode *, struct qstr *, int);
 extern void hfs_inode_write_fork(struct inode *, struct hfs_extent *, __be32 *, __be32 *);
-extern int hfs_write_inode(struct inode *, int);
+extern int hfs_write_inode(struct inode *, struct writeback_control *);
 extern int hfs_inode_setattr(struct dentry *, struct iattr *);
 extern void hfs_inode_read_fork(struct inode *inode, struct hfs_extent *ext,
 			__be32 log_size, __be32 phys_size, u32 clump_size);
@@ -213,7 +213,7 @@ extern void hfs_mdb_put(struct super_block *);
 extern int hfs_part_find(struct super_block *, sector_t *, sector_t *);
 
 /* string.c */
-extern struct dentry_operations hfs_dentry_operations;
+extern const struct dentry_operations hfs_dentry_operations;
 
 extern int hfs_hash_dentry(struct dentry *, struct qstr *);
 extern int hfs_strcmp(const unsigned char *, unsigned int,

@@ -38,6 +38,8 @@
  * @P9_DEBUG_SLABS: memory management tracing
  * @P9_DEBUG_FCALL: verbose dump of protocol messages
  * @P9_DEBUG_FID: fid allocation/deallocation tracking
+ * @P9_DEBUG_PKT: packet marshalling/unmarshalling
+ * @P9_DEBUG_FSC: FS-cache tracing
  *
  * These flags are passed at mount time to turn on various levels of
  * verbosity and tracing which will be output to the system logs.
@@ -54,6 +56,7 @@ enum p9_debug_flags {
 	P9_DEBUG_FCALL =	(1<<8),
 	P9_DEBUG_FID =		(1<<9),
 	P9_DEBUG_PKT =		(1<<10),
+	P9_DEBUG_FSC =		(1<<11),
 };
 
 #ifdef CONFIG_NET_9P_DEBUG
@@ -83,6 +86,10 @@ do { \
 
 /**
  * enum p9_msg_t - 9P message types
+ * @P9_TSTATFS: file system status request
+ * @P9_RSTATFS: file system status response
+ * @P9_TRENAME: rename request
+ * @P9_RRENAME: rename response
  * @P9_TVERSION: version handshake request
  * @P9_RVERSION: version handshake response
  * @P9_TAUTH: request to establish authentication channel
@@ -122,6 +129,10 @@ do { \
  */
 
 enum p9_msg_t {
+	P9_TSTATFS = 8,
+	P9_RSTATFS,
+	P9_TRENAME = 20,
+	P9_RRENAME,
 	P9_TVERSION = 100,
 	P9_RVERSION,
 	P9_TAUTH = 102,
@@ -347,6 +358,31 @@ struct p9_wstat {
 };
 
 /* Structures for Protocol Operations */
+struct p9_tstatfs {
+	u32 fid;
+};
+
+struct p9_rstatfs {
+	u32 type;
+	u32 bsize;
+	u64 blocks;
+	u64 bfree;
+	u64 bavail;
+	u64 files;
+	u64 ffree;
+	u64 fsid;
+	u32 namelen;
+};
+
+struct p9_trename {
+	u32 fid;
+	u32 newdirfid;
+	struct p9_str name;
+};
+
+struct p9_rrename {
+};
+
 struct p9_tversion {
 	u32 msize;
 	struct p9_str version;

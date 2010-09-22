@@ -32,6 +32,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 
 #include <linux/videodev2.h>
@@ -931,7 +932,7 @@ static int saa717x_s_ctrl(struct v4l2_subdev *sd, struct v4l2_control *ctrl)
 		break;
 
 	case V4L2_CID_HUE:
-		if (ctrl->value < -127 || ctrl->value > 127) {
+		if (ctrl->value < -128 || ctrl->value > 127) {
 			v4l2_err(sd, "invalid hue setting %d\n", ctrl->value);
 			return -ERANGE;
 		}
@@ -1104,22 +1105,22 @@ static struct v4l2_queryctrl saa717x_qctrl[] = {
 	},
 };
 
-static int saa717x_s_video_routing(struct v4l2_subdev *sd, const struct v4l2_routing *route)
+static int saa717x_s_video_routing(struct v4l2_subdev *sd,
+				   u32 input, u32 output, u32 config)
 {
 	struct saa717x_state *decoder = to_state(sd);
-	int inp = route->input;
-	int is_tuner = inp & 0x80;  /* tuner input flag */
+	int is_tuner = input & 0x80;  /* tuner input flag */
 
-	inp &= 0x7f;
+	input &= 0x7f;
 
-	v4l2_dbg(1, debug, sd, "decoder set input (%d)\n", inp);
+	v4l2_dbg(1, debug, sd, "decoder set input (%d)\n", input);
 	/* inputs from 0-9 are available*/
 	/* saa717x have mode0-mode9 but mode5 is reserved. */
-	if (inp < 0 || inp > 9 || inp == 5)
+	if (input > 9 || input == 5)
 		return -EINVAL;
 
-	if (decoder->input != inp) {
-		int input_line = inp;
+	if (decoder->input != input) {
+		int input_line = input;
 
 		decoder->input = input_line;
 		v4l2_dbg(1, debug, sd,  "now setting %s input %d\n",
@@ -1198,28 +1199,32 @@ static int saa717x_s_register(struct v4l2_subdev *sd, struct v4l2_dbg_register *
 }
 #endif
 
-static int saa717x_s_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
+static int saa717x_s_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
 {
-	struct v4l2_pix_format *pix;
 	int prescale, h_scale, v_scale;
 
-	pix = &fmt->fmt.pix;
 	v4l2_dbg(1, debug, sd, "decoder set size\n");
 
+	if (fmt->code != V4L2_MBUS_FMT_FIXED)
+		return -EINVAL;
+
 	/* FIXME need better bounds checking here */
-	if (pix->width < 1 || pix->width > 1440)
+	if (fmt->width < 1 || fmt->width > 1440)
 		return -EINVAL;
-	if (pix->height < 1 || pix->height > 960)
+	if (fmt->height < 1 || fmt->height > 960)
 		return -EINVAL;
+
+	fmt->field = V4L2_FIELD_INTERLACED;
+	fmt->colorspace = V4L2_COLORSPACE_SMPTE170M;
 
 	/* scaling setting */
 	/* NTSC and interlace only */
-	prescale = SAA717X_NTSC_WIDTH / pix->width;
+	prescale = SAA717X_NTSC_WIDTH / fmt->width;
 	if (prescale == 0)
 		prescale = 1;
-	h_scale = 1024 * SAA717X_NTSC_WIDTH / prescale / pix->width;
+	h_scale = 1024 * SAA717X_NTSC_WIDTH / prescale / fmt->width;
 	/* interlace */
-	v_scale = 512 * 2 * SAA717X_NTSC_HEIGHT / pix->height;
+	v_scale = 512 * 2 * SAA717X_NTSC_HEIGHT / fmt->height;
 
 	/* Horizontal prescaling etc */
 	set_h_prescale(sd, 0, prescale);
@@ -1240,19 +1245,19 @@ static int saa717x_s_fmt(struct v4l2_subdev *sd, struct v4l2_format *fmt)
 	/* set video output size */
 	/* video number of pixels at output */
 	/* TASK A */
-	saa717x_write(sd, 0x5C, (u8)(pix->width & 0xFF));
-	saa717x_write(sd, 0x5D, (u8)((pix->width >> 8) & 0xFF));
+	saa717x_write(sd, 0x5C, (u8)(fmt->width & 0xFF));
+	saa717x_write(sd, 0x5D, (u8)((fmt->width >> 8) & 0xFF));
 	/* TASK B */
-	saa717x_write(sd, 0x9C, (u8)(pix->width & 0xFF));
-	saa717x_write(sd, 0x9D, (u8)((pix->width >> 8) & 0xFF));
+	saa717x_write(sd, 0x9C, (u8)(fmt->width & 0xFF));
+	saa717x_write(sd, 0x9D, (u8)((fmt->width >> 8) & 0xFF));
 
 	/* video number of lines at output */
 	/* TASK A */
-	saa717x_write(sd, 0x5E, (u8)(pix->height & 0xFF));
-	saa717x_write(sd, 0x5F, (u8)((pix->height >> 8) & 0xFF));
+	saa717x_write(sd, 0x5E, (u8)(fmt->height & 0xFF));
+	saa717x_write(sd, 0x5F, (u8)((fmt->height >> 8) & 0xFF));
 	/* TASK B */
-	saa717x_write(sd, 0x9E, (u8)(pix->height & 0xFF));
-	saa717x_write(sd, 0x9F, (u8)((pix->height >> 8) & 0xFF));
+	saa717x_write(sd, 0x9E, (u8)(fmt->height & 0xFF));
+	saa717x_write(sd, 0x9F, (u8)((fmt->height >> 8) & 0xFF));
 	return 0;
 }
 
@@ -1276,12 +1281,13 @@ static int saa717x_s_std(struct v4l2_subdev *sd, v4l2_std_id std)
 	return 0;
 }
 
-static int saa717x_s_audio_routing(struct v4l2_subdev *sd, const struct v4l2_routing *route)
+static int saa717x_s_audio_routing(struct v4l2_subdev *sd,
+				   u32 input, u32 output, u32 config)
 {
 	struct saa717x_state *decoder = to_state(sd);
 
-	if (route->input < 3) { /* FIXME! --tadachi */
-		decoder->audio_input = route->input;
+	if (input < 3) { /* FIXME! --tadachi */
+		decoder->audio_input = input;
 		v4l2_dbg(1, debug, sd,
 				"set decoder audio input to %d\n",
 				decoder->audio_input);
@@ -1311,7 +1317,7 @@ static int saa717x_s_tuner(struct v4l2_subdev *sd, struct v4l2_tuner *vt)
 		"MONO", "STEREO", "LANG1", "LANG2/SAP"
 	};
 
-	audio_mode = V4L2_TUNER_MODE_STEREO;
+	audio_mode = TUNER_AUDIO_STEREO;
 
 	switch (vt->audmode) {
 		case V4L2_TUNER_MODE_MONO:
@@ -1380,11 +1386,6 @@ static int saa717x_g_tuner(struct v4l2_subdev *sd, struct v4l2_tuner *vt)
 	return 0;
 }
 
-static int saa717x_command(struct i2c_client *client, unsigned cmd, void *arg)
-{
-	return v4l2_subdev_command(i2c_get_clientdata(client), cmd, arg);
-}
-
 /* ----------------------------------------------------------------------- */
 
 static const struct v4l2_subdev_core_ops saa717x_core_ops = {
@@ -1395,18 +1396,18 @@ static const struct v4l2_subdev_core_ops saa717x_core_ops = {
 	.queryctrl = saa717x_queryctrl,
 	.g_ctrl = saa717x_g_ctrl,
 	.s_ctrl = saa717x_s_ctrl,
+	.s_std = saa717x_s_std,
 };
 
 static const struct v4l2_subdev_tuner_ops saa717x_tuner_ops = {
 	.g_tuner = saa717x_g_tuner,
 	.s_tuner = saa717x_s_tuner,
-	.s_std = saa717x_s_std,
 	.s_radio = saa717x_s_radio,
 };
 
 static const struct v4l2_subdev_video_ops saa717x_video_ops = {
 	.s_routing = saa717x_s_video_routing,
-	.s_fmt = saa717x_s_fmt,
+	.s_mbus_fmt = saa717x_s_mbus_fmt,
 	.s_stream = saa717x_s_stream,
 };
 
@@ -1528,10 +1529,7 @@ MODULE_DEVICE_TABLE(i2c, saa717x_id);
 
 static struct v4l2_i2c_driver_data v4l2_i2c_data = {
 	.name = "saa717x",
-	.driverid = I2C_DRIVERID_SAA717X,
-	.command = saa717x_command,
 	.probe = saa717x_probe,
 	.remove = saa717x_remove,
-	.legacy_class = I2C_CLASS_TV_ANALOG | I2C_CLASS_TV_DIGITAL,
 	.id_table = saa717x_id,
 };

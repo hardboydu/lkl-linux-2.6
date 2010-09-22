@@ -24,7 +24,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -104,7 +103,7 @@ static int sclhi(struct i2c_algo_bit_data *adap)
 		 * chips may hold it low ("clock stretching") while they
 		 * are processing data internally.
 		 */
-		if (time_after_eq(jiffies, start + adap->timeout))
+		if (time_after(jiffies, start + adap->timeout))
 			return -ETIMEDOUT;
 		cond_resched();
 	}
@@ -522,6 +521,12 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 	int i, ret;
 	unsigned short nak_ok;
 
+	if (adap->pre_xfer) {
+		ret = adap->pre_xfer(i2c_adap);
+		if (ret < 0)
+			return ret;
+	}
+
 	bit_dbg(3, &i2c_adap->dev, "emitting start condition\n");
 	i2c_start(adap);
 	for (i = 0; i < num; i++) {
@@ -570,6 +575,9 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 bailout:
 	bit_dbg(3, &i2c_adap->dev, "emitting stop condition\n");
 	i2c_stop(adap);
+
+	if (adap->post_xfer)
+		adap->post_xfer(i2c_adap);
 	return ret;
 }
 
@@ -604,9 +612,7 @@ static int i2c_bit_prepare_bus(struct i2c_adapter *adap)
 
 	/* register new adapter to i2c module... */
 	adap->algo = &i2c_bit_algo;
-
-	adap->timeout = 100;	/* default values, should	*/
-	adap->retries = 3;	/* be replaced by defines	*/
+	adap->retries = 3;
 
 	return 0;
 }

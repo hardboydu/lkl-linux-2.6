@@ -12,17 +12,14 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/mm.h>
-#include <linux/sched.h>
-#include <linux/interrupt.h>
-#include <linux/ioport.h>
-#include <linux/mtd/physmap.h>
 #include <linux/platform_device.h>
-#include <linux/io.h>
-#include <linux/i2c.h>
+#include <linux/mtd/physmap.h>
+
 #include <mach/hardware.h>
+
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
+
 
 static struct physmap_flash_data adssphere_flash_data = {
 	.width		= 4,
@@ -44,7 +41,7 @@ static struct platform_device adssphere_flash = {
 	.resource	= &adssphere_flash_resource,
 };
 
-static struct ep93xx_eth_data adssphere_eth_data = {
+static struct ep93xx_eth_data __initdata adssphere_eth_data = {
 	.phy_id		= 1,
 };
 

@@ -24,7 +24,6 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <linux/slab.h>
 #include <linux/moduleparam.h>
 
 #include <sound/core.h>
@@ -314,7 +313,7 @@ static void snd_hammerfall_free_buffer(struct snd_dma_buffer *dmab, struct pci_d
 }
 
 
-static struct pci_device_id snd_rme9652_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_rme9652_ids) = {
 	{
 		.vendor	   = 0x10ee,
 		.device	   = 0x3fc4,
@@ -2594,11 +2593,11 @@ static int __devinit snd_rme9652_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_rme9652));
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_rme9652), &card);
 
-	if (!card)
-		return -ENOMEM;
+	if (err < 0)
+		return err;
 
 	rme9652 = (struct snd_rme9652 *) card->private_data;
 	card->private_free = snd_rme9652_card_free;

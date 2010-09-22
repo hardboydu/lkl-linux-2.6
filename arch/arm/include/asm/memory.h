@@ -44,11 +44,24 @@
  * The module space lives between the addresses given by TASK_SIZE
  * and PAGE_OFFSET - it must be within 32MB of the kernel text.
  */
-#define MODULES_END		(PAGE_OFFSET)
-#define MODULES_VADDR		(MODULES_END - 16*1048576)
+#ifndef CONFIG_THUMB2_KERNEL
+#define MODULES_VADDR		(PAGE_OFFSET - 16*1024*1024)
+#else
+/* smaller range for Thumb-2 symbols relocation (2^24)*/
+#define MODULES_VADDR		(PAGE_OFFSET - 8*1024*1024)
+#endif
 
 #if TASK_SIZE > MODULES_VADDR
 #error Top of user space clashes with start of module space
+#endif
+
+/*
+ * The highmem pkmap virtual space shares the end of the module area.
+ */
+#ifdef CONFIG_HIGHMEM
+#define MODULES_END		(PAGE_OFFSET - PMD_SIZE)
+#else
+#define MODULES_END		(PAGE_OFFSET)
 #endif
 
 /*
@@ -62,6 +75,17 @@
  * Allow 16MB-aligned ioremap pages
  */
 #define IOREMAP_MAX_ORDER	24
+
+/*
+ * Size of DMA-consistent memory region.  Must be multiple of 2M,
+ * between 2MB and 14MB inclusive.
+ */
+#ifndef CONSISTENT_DMA_SIZE
+#define CONSISTENT_DMA_SIZE 	SZ_2M
+#endif
+
+#define CONSISTENT_END		(0xffe00000UL)
+#define CONSISTENT_BASE		(CONSISTENT_END - CONSISTENT_DMA_SIZE)
 
 #else /* CONFIG_MMU */
 
@@ -80,11 +104,11 @@
 #endif
 
 #ifndef PHYS_OFFSET
-#define PHYS_OFFSET 		(CONFIG_DRAM_BASE)
+#define PHYS_OFFSET 		UL(CONFIG_DRAM_BASE)
 #endif
 
 #ifndef END_MEM
-#define END_MEM     		(CONFIG_DRAM_BASE + CONFIG_DRAM_SIZE)
+#define END_MEM     		(UL(CONFIG_DRAM_BASE) + CONFIG_DRAM_SIZE)
 #endif
 
 #ifndef PAGE_OFFSET
@@ -100,26 +124,26 @@
 #endif /* !CONFIG_MMU */
 
 /*
- * Size of DMA-consistent memory region.  Must be multiple of 2M,
- * between 2MB and 14MB inclusive.
- */
-#ifndef CONSISTENT_DMA_SIZE
-#define CONSISTENT_DMA_SIZE SZ_2M
-#endif
-
-/*
  * Physical vs virtual RAM address space conversion.  These are
  * private definitions which should NOT be used outside memory.h
  * files.  Use virt_to_phys/phys_to_virt/__pa/__va instead.
  */
+#ifndef __virt_to_phys
 #define __virt_to_phys(x)	((x) - PAGE_OFFSET + PHYS_OFFSET)
 #define __phys_to_virt(x)	((x) - PHYS_OFFSET + PAGE_OFFSET)
+#endif
 
 /*
  * Convert a physical address to a Page Frame Number and back
  */
 #define	__phys_to_pfn(paddr)	((paddr) >> PAGE_SHIFT)
 #define	__pfn_to_phys(pfn)	((pfn) << PAGE_SHIFT)
+
+/*
+ * Convert a page to/from a physical address
+ */
+#define page_to_phys(page)	(__pfn_to_phys(page_to_pfn(page)))
+#define phys_to_page(phys)	(pfn_to_page(__phys_to_pfn(phys)))
 
 #ifndef __ASSEMBLY__
 
@@ -181,6 +205,8 @@ static inline void *phys_to_virt(unsigned long x)
 #ifndef __virt_to_bus
 #define __virt_to_bus	__virt_to_phys
 #define __bus_to_virt	__phys_to_virt
+#define __pfn_to_bus(x)	__pfn_to_phys(x)
+#define __bus_to_pfn(x)	__phys_to_pfn(x)
 #endif
 
 static inline __deprecated unsigned long virt_to_bus(void *x)
@@ -204,7 +230,6 @@ static inline __deprecated void *bus_to_virt(unsigned long x)
  *
  *  page_to_pfn(page)	convert a struct page * to a PFN number
  *  pfn_to_page(pfn)	convert a _valid_ PFN number to struct page *
- *  pfn_valid(pfn)	indicates whether a PFN number is valid
  *
  *  virt_to_page(k)	convert a _valid_ virtual address to struct page *
  *  virt_addr_valid(k)	indicates whether a virtual address is valid
@@ -212,10 +237,6 @@ static inline __deprecated void *bus_to_virt(unsigned long x)
 #ifndef CONFIG_DISCONTIGMEM
 
 #define ARCH_PFN_OFFSET		PHYS_PFN_OFFSET
-
-#ifndef CONFIG_SPARSEMEM
-#define pfn_valid(pfn)		((pfn) >= PHYS_PFN_OFFSET && (pfn) < (PHYS_PFN_OFFSET + max_mapnr))
-#endif
 
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 #define virt_addr_valid(kaddr)	((unsigned long)(kaddr) >= PAGE_OFFSET && (unsigned long)(kaddr) < (unsigned long)high_memory)
@@ -232,18 +253,6 @@ static inline __deprecated void *bus_to_virt(unsigned long x)
 
 #define arch_pfn_to_nid(pfn)	PFN_TO_NID(pfn)
 #define arch_local_page_offset(pfn, nid) LOCAL_MAP_NR((pfn) << PAGE_SHIFT)
-
-#define pfn_valid(pfn)						\
-	({							\
-		unsigned int nid = PFN_TO_NID(pfn);		\
-		int valid = nid < MAX_NUMNODES;			\
-		if (valid) {					\
-			pg_data_t *node = NODE_DATA(nid);	\
-			valid = (pfn - node->node_start_pfn) <	\
-				node->node_spanned_pages;	\
-		}						\
-		valid;						\
-	})
 
 #define virt_to_page(kaddr)					\
 	(ADDR_TO_MAPBASE(kaddr) + LOCAL_MAP_NR(kaddr))
@@ -294,11 +303,6 @@ static inline __deprecated void *bus_to_virt(unsigned long x)
 #endif /* NODE_MEM_SIZE_BITS */
 
 #endif /* !CONFIG_DISCONTIGMEM */
-
-/*
- * For BIO.  "will die".  Kill me when bio_to_phys() and bvec_to_phys() die.
- */
-#define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 
 /*
  * Optional coherency support.  Currently used only by selected

@@ -5,12 +5,15 @@
  */
 
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <linux/sunrpc/stats.h>
 #include <linux/sunrpc/svc_xprt.h>
+#include <linux/sunrpc/svcsock.h>
 
 #define RPCDBG_FACILITY	RPCDBG_SVCXPRT
 
@@ -125,8 +128,8 @@ static void svc_xprt_free(struct kref *kref)
 	struct svc_xprt *xprt =
 		container_of(kref, struct svc_xprt, xpt_ref);
 	struct module *owner = xprt->xpt_class->xcl_owner;
-	if (test_bit(XPT_CACHE_AUTH, &xprt->xpt_flags)
-	    && xprt->xpt_auth_cache != NULL)
+	if (test_bit(XPT_CACHE_AUTH, &xprt->xpt_flags) &&
+	    xprt->xpt_auth_cache != NULL)
 		svcauth_unix_info_release(xprt->xpt_auth_cache);
 	xprt->xpt_ops->xpo_free(xprt);
 	module_put(owner);
@@ -156,35 +159,42 @@ void svc_xprt_init(struct svc_xprt_class *xcl, struct svc_xprt *xprt,
 	mutex_init(&xprt->xpt_mutex);
 	spin_lock_init(&xprt->xpt_lock);
 	set_bit(XPT_BUSY, &xprt->xpt_flags);
+	rpc_init_wait_queue(&xprt->xpt_bc_pending, "xpt_bc_pending");
 }
 EXPORT_SYMBOL_GPL(svc_xprt_init);
 
 static struct svc_xprt *__svc_xpo_create(struct svc_xprt_class *xcl,
 					 struct svc_serv *serv,
-					 unsigned short port, int flags)
+					 const int family,
+					 const unsigned short port,
+					 int flags)
 {
 	struct sockaddr_in sin = {
 		.sin_family		= AF_INET,
 		.sin_addr.s_addr	= htonl(INADDR_ANY),
 		.sin_port		= htons(port),
 	};
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	struct sockaddr_in6 sin6 = {
 		.sin6_family		= AF_INET6,
 		.sin6_addr		= IN6ADDR_ANY_INIT,
 		.sin6_port		= htons(port),
 	};
+#endif	/* defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE) */
 	struct sockaddr *sap;
 	size_t len;
 
-	switch (serv->sv_family) {
-	case AF_INET:
+	switch (family) {
+	case PF_INET:
 		sap = (struct sockaddr *)&sin;
 		len = sizeof(sin);
 		break;
-	case AF_INET6:
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	case PF_INET6:
 		sap = (struct sockaddr *)&sin6;
 		len = sizeof(sin6);
 		break;
+#endif	/* defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE) */
 	default:
 		return ERR_PTR(-EAFNOSUPPORT);
 	}
@@ -192,7 +202,8 @@ static struct svc_xprt *__svc_xpo_create(struct svc_xprt_class *xcl,
 	return xcl->xcl_ops->xpo_create(serv, sap, len, flags);
 }
 
-int svc_create_xprt(struct svc_serv *serv, char *xprt_name, unsigned short port,
+int svc_create_xprt(struct svc_serv *serv, const char *xprt_name,
+		    const int family, const unsigned short port,
 		    int flags)
 {
 	struct svc_xprt_class *xcl;
@@ -209,7 +220,7 @@ int svc_create_xprt(struct svc_serv *serv, char *xprt_name, unsigned short port,
 			goto err;
 
 		spin_unlock(&svc_xprt_class_lock);
-		newxprt = __svc_xpo_create(xcl, serv, port, flags);
+		newxprt = __svc_xpo_create(xcl, serv, family, port, flags);
 		if (IS_ERR(newxprt)) {
 			module_put(xcl->xcl_owner);
 			return PTR_ERR(newxprt);
@@ -225,7 +236,10 @@ int svc_create_xprt(struct svc_serv *serv, char *xprt_name, unsigned short port,
  err:
 	spin_unlock(&svc_xprt_class_lock);
 	dprintk("svc: transport %s not found\n", xprt_name);
-	return -ENOENT;
+
+	/* This errno is exposed to user space.  Provide a reasonable
+	 * perror msg for a bad transport. */
+	return -EPROTONOSUPPORT;
 }
 EXPORT_SYMBOL_GPL(svc_create_xprt);
 
@@ -321,6 +335,8 @@ void svc_xprt_enqueue(struct svc_xprt *xprt)
 		goto out_unlock;
 	}
 
+	pool->sp_stats.packets++;
+
 	/* Mark transport as busy. It will remain in this state until
 	 * the provider calls svc_xprt_received. We update XPT_BUSY
 	 * atomically because it also guards against trying to enqueue
@@ -368,11 +384,13 @@ void svc_xprt_enqueue(struct svc_xprt *xprt)
 		svc_xprt_get(xprt);
 		rqstp->rq_reserved = serv->sv_max_mesg;
 		atomic_add(rqstp->rq_reserved, &xprt->xpt_reserved);
+		pool->sp_stats.threads_woken++;
 		BUG_ON(xprt->xpt_pool != pool);
 		wake_up(&rqstp->rq_wait);
 	} else {
 		dprintk("svc: transport %p put into queue\n", xprt);
 		list_add_tail(&xprt->xpt_ready, &pool->sp_sockets);
+		pool->sp_stats.sockets_queued++;
 		BUG_ON(xprt->xpt_pool != pool);
 	}
 
@@ -585,6 +603,7 @@ int svc_recv(struct svc_rqst *rqstp, long timeout)
 	int			pages;
 	struct xdr_buf		*arg;
 	DECLARE_WAITQUEUE(wait, current);
+	long			time_left;
 
 	dprintk("svc: server %p waiting for data (to = %ld)\n",
 		rqstp, timeout);
@@ -665,12 +684,14 @@ int svc_recv(struct svc_rqst *rqstp, long timeout)
 		add_wait_queue(&rqstp->rq_wait, &wait);
 		spin_unlock_bh(&pool->sp_lock);
 
-		schedule_timeout(timeout);
+		time_left = schedule_timeout(timeout);
 
 		try_to_freeze();
 
 		spin_lock_bh(&pool->sp_lock);
 		remove_wait_queue(&rqstp->rq_wait, &wait);
+		if (!time_left)
+			pool->sp_stats.threads_timedout++;
 
 		xprt = rqstp->rq_xprt;
 		if (!xprt) {
@@ -723,8 +744,10 @@ int svc_recv(struct svc_rqst *rqstp, long timeout)
 		if (rqstp->rq_deferred) {
 			svc_xprt_received(xprt);
 			len = svc_deferred_recv(rqstp);
-		} else
+		} else {
 			len = xprt->xpt_ops->xpo_recvfrom(rqstp);
+			svc_xprt_received(xprt);
+		}
 		dprintk("svc: got len=%d\n", len);
 	}
 
@@ -784,6 +807,7 @@ int svc_send(struct svc_rqst *rqstp)
 	else
 		len = xprt->xpt_ops->xpo_sendto(rqstp);
 	mutex_unlock(&xprt->xpt_mutex);
+	rpc_wake_up(&xprt->xpt_bc_pending);
 	svc_xprt_release(rqstp);
 
 	if (len == -ECONNREFUSED || len == -ENOTCONN || len == -EAGAIN)
@@ -818,8 +842,8 @@ static void svc_age_temp_xprts(unsigned long closure)
 		 * through, close it. */
 		if (!test_and_set_bit(XPT_OLD, &xprt->xpt_flags))
 			continue;
-		if (atomic_read(&xprt->xpt_ref.refcount) > 1
-		    || test_bit(XPT_BUSY, &xprt->xpt_flags))
+		if (atomic_read(&xprt->xpt_ref.refcount) > 1 ||
+		    test_bit(XPT_BUSY, &xprt->xpt_flags))
 			continue;
 		svc_xprt_get(xprt);
 		list_move(le, &to_be_aged);
@@ -871,15 +895,12 @@ void svc_delete_xprt(struct svc_xprt *xprt)
 	 */
 	if (test_bit(XPT_TEMP, &xprt->xpt_flags))
 		serv->sv_tmpcnt--;
+	spin_unlock_bh(&serv->sv_lock);
 
-	for (dr = svc_deferred_dequeue(xprt); dr;
-	     dr = svc_deferred_dequeue(xprt)) {
-		svc_xprt_put(xprt);
+	while ((dr = svc_deferred_dequeue(xprt)) != NULL)
 		kfree(dr);
-	}
 
 	svc_xprt_put(xprt);
-	spin_unlock_bh(&serv->sv_lock);
 }
 
 void svc_close_xprt(struct svc_xprt *xprt)
@@ -955,7 +976,7 @@ static struct cache_deferred_req *svc_defer(struct cache_req *req)
 	struct svc_rqst *rqstp = container_of(req, struct svc_rqst, rq_chandle);
 	struct svc_deferred_req *dr;
 
-	if (rqstp->rq_arg.page_len)
+	if (rqstp->rq_arg.page_len || !rqstp->rq_usedeferral)
 		return NULL; /* if more than a page, give up FIXME */
 	if (rqstp->rq_deferred) {
 		dr = rqstp->rq_deferred;
@@ -1033,7 +1054,13 @@ static struct svc_deferred_req *svc_deferred_dequeue(struct svc_xprt *xprt)
 	return dr;
 }
 
-/*
+/**
+ * svc_find_xprt - find an RPC transport instance
+ * @serv: pointer to svc_serv to search
+ * @xcl_name: C string containing transport's class name
+ * @af: Address family of transport's local address
+ * @port: transport's IP port number
+ *
  * Return the transport instance pointer for the endpoint accepting
  * connections/peer traffic from the specified transport class,
  * address family and port.
@@ -1042,14 +1069,14 @@ static struct svc_deferred_req *svc_deferred_dequeue(struct svc_xprt *xprt)
  * wild-card, and will result in matching the first transport in the
  * service's list that has a matching class name.
  */
-struct svc_xprt *svc_find_xprt(struct svc_serv *serv, char *xcl_name,
-			       int af, int port)
+struct svc_xprt *svc_find_xprt(struct svc_serv *serv, const char *xcl_name,
+			       const sa_family_t af, const unsigned short port)
 {
 	struct svc_xprt *xprt;
 	struct svc_xprt *found = NULL;
 
 	/* Sanity check the args */
-	if (!serv || !xcl_name)
+	if (serv == NULL || xcl_name == NULL)
 		return found;
 
 	spin_lock_bh(&serv->sv_lock);
@@ -1058,7 +1085,7 @@ struct svc_xprt *svc_find_xprt(struct svc_serv *serv, char *xcl_name,
 			continue;
 		if (af != AF_UNSPEC && af != xprt->xpt_local.ss_family)
 			continue;
-		if (port && port != svc_xprt_local_port(xprt))
+		if (port != 0 && port != svc_xprt_local_port(xprt))
 			continue;
 		found = xprt;
 		svc_xprt_get(xprt);
@@ -1069,37 +1096,137 @@ struct svc_xprt *svc_find_xprt(struct svc_serv *serv, char *xcl_name,
 }
 EXPORT_SYMBOL_GPL(svc_find_xprt);
 
-/*
- * Format a buffer with a list of the active transports. A zero for
- * the buflen parameter disables target buffer overflow checking.
+static int svc_one_xprt_name(const struct svc_xprt *xprt,
+			     char *pos, int remaining)
+{
+	int len;
+
+	len = snprintf(pos, remaining, "%s %u\n",
+			xprt->xpt_class->xcl_name,
+			svc_xprt_local_port(xprt));
+	if (len >= remaining)
+		return -ENAMETOOLONG;
+	return len;
+}
+
+/**
+ * svc_xprt_names - format a buffer with a list of transport names
+ * @serv: pointer to an RPC service
+ * @buf: pointer to a buffer to be filled in
+ * @buflen: length of buffer to be filled in
+ *
+ * Fills in @buf with a string containing a list of transport names,
+ * each name terminated with '\n'.
+ *
+ * Returns positive length of the filled-in string on success; otherwise
+ * a negative errno value is returned if an error occurs.
  */
-int svc_xprt_names(struct svc_serv *serv, char *buf, int buflen)
+int svc_xprt_names(struct svc_serv *serv, char *buf, const int buflen)
 {
 	struct svc_xprt *xprt;
-	char xprt_str[64];
-	int totlen = 0;
-	int len;
+	int len, totlen;
+	char *pos;
 
 	/* Sanity check args */
 	if (!serv)
 		return 0;
 
 	spin_lock_bh(&serv->sv_lock);
+
+	pos = buf;
+	totlen = 0;
 	list_for_each_entry(xprt, &serv->sv_permsocks, xpt_list) {
-		len = snprintf(xprt_str, sizeof(xprt_str),
-			       "%s %d\n", xprt->xpt_class->xcl_name,
-			       svc_xprt_local_port(xprt));
-		/* If the string was truncated, replace with error string */
-		if (len >= sizeof(xprt_str))
-			strcpy(xprt_str, "name-too-long\n");
-		/* Don't overflow buffer */
-		len = strlen(xprt_str);
-		if (buflen && (len + totlen >= buflen))
+		len = svc_one_xprt_name(xprt, pos, buflen - totlen);
+		if (len < 0) {
+			*buf = '\0';
+			totlen = len;
+		}
+		if (len <= 0)
 			break;
-		strcpy(buf+totlen, xprt_str);
+
+		pos += len;
 		totlen += len;
 	}
+
 	spin_unlock_bh(&serv->sv_lock);
 	return totlen;
 }
 EXPORT_SYMBOL_GPL(svc_xprt_names);
+
+
+/*----------------------------------------------------------------------------*/
+
+static void *svc_pool_stats_start(struct seq_file *m, loff_t *pos)
+{
+	unsigned int pidx = (unsigned int)*pos;
+	struct svc_serv *serv = m->private;
+
+	dprintk("svc_pool_stats_start, *pidx=%u\n", pidx);
+
+	if (!pidx)
+		return SEQ_START_TOKEN;
+	return (pidx > serv->sv_nrpools ? NULL : &serv->sv_pools[pidx-1]);
+}
+
+static void *svc_pool_stats_next(struct seq_file *m, void *p, loff_t *pos)
+{
+	struct svc_pool *pool = p;
+	struct svc_serv *serv = m->private;
+
+	dprintk("svc_pool_stats_next, *pos=%llu\n", *pos);
+
+	if (p == SEQ_START_TOKEN) {
+		pool = &serv->sv_pools[0];
+	} else {
+		unsigned int pidx = (pool - &serv->sv_pools[0]);
+		if (pidx < serv->sv_nrpools-1)
+			pool = &serv->sv_pools[pidx+1];
+		else
+			pool = NULL;
+	}
+	++*pos;
+	return pool;
+}
+
+static void svc_pool_stats_stop(struct seq_file *m, void *p)
+{
+}
+
+static int svc_pool_stats_show(struct seq_file *m, void *p)
+{
+	struct svc_pool *pool = p;
+
+	if (p == SEQ_START_TOKEN) {
+		seq_puts(m, "# pool packets-arrived sockets-enqueued threads-woken threads-timedout\n");
+		return 0;
+	}
+
+	seq_printf(m, "%u %lu %lu %lu %lu\n",
+		pool->sp_id,
+		pool->sp_stats.packets,
+		pool->sp_stats.sockets_queued,
+		pool->sp_stats.threads_woken,
+		pool->sp_stats.threads_timedout);
+
+	return 0;
+}
+
+static const struct seq_operations svc_pool_stats_seq_ops = {
+	.start	= svc_pool_stats_start,
+	.next	= svc_pool_stats_next,
+	.stop	= svc_pool_stats_stop,
+	.show	= svc_pool_stats_show,
+};
+
+int svc_pool_stats_open(struct svc_serv *serv, struct file *file)
+{
+	int err;
+
+	err = seq_open(file, &svc_pool_stats_seq_ops);
+	if (!err)
+		((struct seq_file *) file->private_data)->private = serv;
+	return err;
+}
+EXPORT_SYMBOL(svc_pool_stats_open);
+
+/*----------------------------------------------------------------------------*/

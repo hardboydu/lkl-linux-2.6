@@ -68,6 +68,27 @@
 #define DRV_AUTHOR	"Bryan Wu <bryan.wu@analog.com>"
 #define DRV_DESC	"BF5xx on-chip NAND FLash Controller Driver"
 
+/* NFC_STAT Masks */
+#define NBUSY       0x01  /* Not Busy */
+#define WB_FULL     0x02  /* Write Buffer Full */
+#define PG_WR_STAT  0x04  /* Page Write Pending */
+#define PG_RD_STAT  0x08  /* Page Read Pending */
+#define WB_EMPTY    0x10  /* Write Buffer Empty */
+
+/* NFC_IRQSTAT Masks */
+#define NBUSYIRQ    0x01  /* Not Busy IRQ */
+#define WB_OVF      0x02  /* Write Buffer Overflow */
+#define WB_EDGE     0x04  /* Write Buffer Edge Detect */
+#define RD_RDY      0x08  /* Read Data Ready */
+#define WR_DONE     0x10  /* Page Write Done */
+
+/* NFC_RST Masks */
+#define ECC_RST     0x01  /* ECC (and NFC counters) Reset */
+
+/* NFC_PGCTL Masks */
+#define PG_RD_START 0x01  /* Page Read Start */
+#define PG_WR_START 0x02  /* Page Write Start */
+
 #ifdef CONFIG_MTD_NAND_BF5XX_HWECC
 static int hardware_ecc = 1;
 #else
@@ -458,7 +479,7 @@ static irqreturn_t bf5xx_nand_dma_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
+static void bf5xx_nand_dma_rw(struct mtd_info *mtd,
 				uint8_t *buf, int is_read)
 {
 	struct bf5xx_nand_info *info = mtd_to_nand_info(mtd);
@@ -487,7 +508,7 @@ static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
 	 * transferred to generate the correct ECC register
 	 * values.
 	 */
-	bfin_write_NFC_RST(0x1);
+	bfin_write_NFC_RST(ECC_RST);
 	SSYNC();
 
 	disable_dma(CH_NFC);
@@ -496,11 +517,20 @@ static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
 	/* setup DMA register with Blackfin DMA API */
 	set_dma_config(CH_NFC, 0x0);
 	set_dma_start_addr(CH_NFC, (unsigned long) buf);
+
+	/* The DMAs have different size on BF52x and BF54x */
+#ifdef CONFIG_BF52x
+	set_dma_x_count(CH_NFC, (page_size >> 1));
+	set_dma_x_modify(CH_NFC, 2);
+	val = DI_EN | WDSIZE_16;
+#endif
+
+#ifdef CONFIG_BF54x
 	set_dma_x_count(CH_NFC, (page_size >> 2));
 	set_dma_x_modify(CH_NFC, 4);
-
-	/* setup write or read operation */
 	val = DI_EN | WDSIZE_32;
+#endif
+	/* setup write or read operation */
 	if (is_read)
 		val |= WNR;
 	set_dma_config(CH_NFC, val);
@@ -508,12 +538,10 @@ static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
 
 	/* Start PAGE read/write operation */
 	if (is_read)
-		bfin_write_NFC_PGCTL(0x1);
+		bfin_write_NFC_PGCTL(PG_RD_START);
 	else
-		bfin_write_NFC_PGCTL(0x2);
+		bfin_write_NFC_PGCTL(PG_WR_START);
 	wait_for_completion(&info->dma_completion);
-
-	return 0;
 }
 
 static void bf5xx_nand_dma_read_buf(struct mtd_info *mtd,
@@ -552,7 +580,6 @@ static void bf5xx_nand_dma_write_buf(struct mtd_info *mtd,
 static int bf5xx_nand_dma_init(struct bf5xx_nand_info *info)
 {
 	int ret;
-	unsigned short val;
 
 	/* Do not use dma */
 	if (!hardware_ecc)
@@ -560,13 +587,6 @@ static int bf5xx_nand_dma_init(struct bf5xx_nand_info *info)
 
 	init_completion(&info->dma_completion);
 
-#ifdef CONFIG_BF54x
-	/* Setup DMAC1 channel mux for NFC which shared with SDH */
-	val = bfin_read_DMAC1_PERIMUX();
-	val &= 0xFFFE;
-	bfin_write_DMAC1_PERIMUX(val);
-	SSYNC();
-#endif
 	/* Request NFC DMA channel */
 	ret = request_dma(CH_NFC, "BF5XX NFC driver");
 	if (ret < 0) {
@@ -574,7 +594,13 @@ static int bf5xx_nand_dma_init(struct bf5xx_nand_info *info)
 		return ret;
 	}
 
-	set_dma_callback(CH_NFC, (void *) bf5xx_nand_dma_irq, (void *) info);
+#ifdef CONFIG_BF54x
+	/* Setup DMAC1 channel mux for NFC which shared with SDH */
+	bfin_write_DMAC1_PERIMUX(bfin_read_DMAC1_PERIMUX() & ~1);
+	SSYNC();
+#endif
+
+	set_dma_callback(CH_NFC, bf5xx_nand_dma_irq, info);
 
 	/* Turn off the DMA channel first */
 	disable_dma(CH_NFC);
@@ -632,7 +658,7 @@ static int bf5xx_nand_hw_init(struct bf5xx_nand_info *info)
 /*
  * Device management interface
  */
-static int bf5xx_nand_add_partition(struct bf5xx_nand_info *info)
+static int __devinit bf5xx_nand_add_partition(struct bf5xx_nand_info *info)
 {
 	struct mtd_info *mtd = &info->mtd;
 

@@ -287,7 +287,13 @@ static void pc300_pci_remove_one(struct pci_dev *pdev)
 	kfree(card);
 }
 
-
+static const struct net_device_ops pc300_ops = {
+	.ndo_open       = pc300_open,
+	.ndo_stop       = pc300_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = pc300_ioctl,
+};
 
 static int __devinit pc300_pci_init_one(struct pci_dev *pdev,
 					const struct pci_device_id *ent)
@@ -448,9 +454,7 @@ static int __devinit pc300_pci_init_one(struct pci_dev *pdev,
 		dev->mem_start = ramphys;
 		dev->mem_end = ramphys + ramsize - 1;
 		dev->tx_queue_len = 50;
-		dev->do_ioctl = pc300_ioctl;
-		dev->open = pc300_open;
-		dev->stop = pc300_close;
+		dev->netdev_ops = &pc300_ops;
 		hdlc->attach = sca_attach;
 		hdlc->xmit = sca_xmit;
 		port->settings.clock_type = CLOCK_EXT;
@@ -477,7 +481,7 @@ static int __devinit pc300_pci_init_one(struct pci_dev *pdev,
 
 
 
-static struct pci_device_id pc300_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(pc300_pci_tbl) = {
 	{ PCI_VENDOR_ID_CYCLADES, PCI_DEVICE_ID_PC300_RX_1, PCI_ANY_ID,
 	  PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_CYCLADES, PCI_DEVICE_ID_PC300_RX_2, PCI_ANY_ID,

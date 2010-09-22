@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2010, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -108,6 +108,14 @@ static char *acpi_gbl_mutex_names[ACPI_NUM_MUTEX] = {
 #endif
 #endif
 
+/* Lock structure for reader/writer interfaces */
+
+struct acpi_rw_lock {
+	acpi_mutex writer_mutex;
+	acpi_mutex reader_mutex;
+	u32 num_readers;
+};
+
 /*
  * Predefined handles for spinlocks used within the subsystem.
  * These spinlocks are created by acpi_ut_mutex_initialize
@@ -197,6 +205,7 @@ struct acpi_namespace_node {
 #define ANOBJ_METHOD_LOCAL              0x08	/* Node is a method local */
 #define ANOBJ_SUBTREE_HAS_INI           0x10	/* Used to optimize device initialization */
 #define ANOBJ_EVALUATED                 0x20	/* Set on first evaluation of node */
+#define ANOBJ_ALLOCATED_BUFFER          0x40	/* Method AML buffer is dynamic (install_method) */
 
 #define ANOBJ_IS_EXTERNAL               0x08	/* i_aSL only: This object created via External() */
 #define ANOBJ_METHOD_NO_RETVAL          0x10	/* i_aSL only: Method has no return value */
@@ -204,12 +213,12 @@ struct acpi_namespace_node {
 #define ANOBJ_IS_BIT_OFFSET             0x40	/* i_aSL only: Reference is a bit offset */
 #define ANOBJ_IS_REFERENCED             0x80	/* i_aSL only: Object was referenced */
 
-/* One internal RSDT for table management */
+/* Internal ACPI table management - master table list */
 
-struct acpi_internal_rsdt {
-	struct acpi_table_desc *tables;
-	u32 count;
-	u32 size;
+struct acpi_table_list {
+	struct acpi_table_desc *tables;	/* Table descriptor array */
+	u32 current_table_count;	/* Tables currently in the array */
+	u32 max_table_count;	/* Max tables array will hold */
 	u8 flags;
 };
 
@@ -360,6 +369,20 @@ union acpi_predefined_info {
 	struct acpi_package_info3 ret_info3;
 };
 
+/* Data block used during object validation */
+
+struct acpi_predefined_data {
+	char *pathname;
+	const union acpi_predefined_info *predefined;
+	union acpi_operand_object *parent_package;
+	u32 flags;
+	u8 node_flags;
+};
+
+/* Defines for Flags field above */
+
+#define ACPI_OBJECT_REPAIRED    1
+
 /*
  * Bitmapped return value types
  * Note: the actual data types must be contiguous, a loop in nspredef.c
@@ -404,6 +427,8 @@ struct acpi_gpe_event_info {
 	struct acpi_gpe_register_info *register_info;	/* Backpointer to register info */
 	u8 flags;		/* Misc info about this GPE */
 	u8 gpe_number;		/* This GPE */
+	u8 runtime_count;	/* References to a run GPE */
+	u8 wakeup_count;	/* References to a wake GPE */
 };
 
 /* Information about a GPE register pair, one per each status/enable pair in an array */
@@ -429,6 +454,7 @@ struct acpi_gpe_block_info {
 	struct acpi_gpe_event_info *event_info;	/* One for each GPE */
 	struct acpi_generic_address block_address;	/* Base address of the block */
 	u32 register_count;	/* Number of register pairs in block */
+	u16 gpe_count;		/* Number of individual GPEs in block */
 	u8 block_base_number;	/* Base GPE number for this block */
 };
 
@@ -444,6 +470,10 @@ struct acpi_gpe_xrupt_info {
 struct acpi_gpe_walk_info {
 	struct acpi_namespace_node *gpe_device;
 	struct acpi_gpe_block_info *gpe_block;
+	u16 count;
+	acpi_owner_id owner_id;
+	u8 enable_this_gpe;
+	u8 execute_by_owner_id;
 };
 
 struct acpi_gpe_device_info {
@@ -627,8 +657,7 @@ struct acpi_opcode_info {
 };
 
 union acpi_parse_value {
-	acpi_integer integer;	/* Integer constant (Up to 64 bits) */
-	struct uint64_struct integer64;	/* Structure overlay for 2 32-bit Dwords */
+	u64 integer;		/* Integer constant (Up to 64 bits) */
 	u32 size;		/* bytelist or field size */
 	char *string;		/* NULL terminated string */
 	u8 *buffer;		/* buffer or string */
@@ -772,7 +801,27 @@ struct acpi_bit_register_info {
  * must be preserved.
  */
 #define ACPI_PM1_STATUS_PRESERVED_BITS          0x0800	/* Bit 11 */
-#define ACPI_PM1_CONTROL_PRESERVED_BITS         0x0200	/* Bit 9 (whatever) */
+
+/* Write-only bits must be zeroed by software */
+
+#define ACPI_PM1_CONTROL_WRITEONLY_BITS         0x2004	/* Bits 13, 2 */
+
+/* For control registers, both ignored and reserved bits must be preserved */
+
+/*
+ * For PM1 control, the SCI enable bit (bit 0, SCI_EN) is defined by the
+ * ACPI specification to be a "preserved" bit - "OSPM always preserves this
+ * bit position", section 4.7.3.2.1. However, on some machines the OS must
+ * write a one to this bit after resume for the machine to work properly.
+ * To enable this, we no longer attempt to preserve this bit. No machines
+ * are known to fail if the bit is not preserved. (May 2009)
+ */
+#define ACPI_PM1_CONTROL_IGNORED_BITS           0x0200	/* Bit 9 */
+#define ACPI_PM1_CONTROL_RESERVED_BITS          0xC1F8	/* Bits 14-15, 3-8 */
+#define ACPI_PM1_CONTROL_PRESERVED_BITS \
+	       (ACPI_PM1_CONTROL_IGNORED_BITS | ACPI_PM1_CONTROL_RESERVED_BITS)
+
+#define ACPI_PM2_CONTROL_PRESERVED_BITS         0xFFFFFFFE	/* All except bit 0 */
 
 /*
  * Register IDs
@@ -781,12 +830,10 @@ struct acpi_bit_register_info {
 #define ACPI_REGISTER_PM1_STATUS                0x01
 #define ACPI_REGISTER_PM1_ENABLE                0x02
 #define ACPI_REGISTER_PM1_CONTROL               0x03
-#define ACPI_REGISTER_PM1A_CONTROL              0x04
-#define ACPI_REGISTER_PM1B_CONTROL              0x05
-#define ACPI_REGISTER_PM2_CONTROL               0x06
-#define ACPI_REGISTER_PM_TIMER                  0x07
-#define ACPI_REGISTER_PROCESSOR_BLOCK           0x08
-#define ACPI_REGISTER_SMI_COMMAND_BLOCK         0x09
+#define ACPI_REGISTER_PM2_CONTROL               0x04
+#define ACPI_REGISTER_PM_TIMER                  0x05
+#define ACPI_REGISTER_PROCESSOR_BLOCK           0x06
+#define ACPI_REGISTER_SMI_COMMAND_BLOCK         0x07
 
 /* Masks used to access the bit_registers */
 
@@ -818,7 +865,7 @@ struct acpi_bit_register_info {
 #define ACPI_BITMASK_SCI_ENABLE                 0x0001
 #define ACPI_BITMASK_BUS_MASTER_RLD             0x0002
 #define ACPI_BITMASK_GLOBAL_LOCK_RELEASE        0x0004
-#define ACPI_BITMASK_SLEEP_TYPE_X               0x1C00
+#define ACPI_BITMASK_SLEEP_TYPE                 0x1C00
 #define ACPI_BITMASK_SLEEP_ENABLE               0x2000
 
 #define ACPI_BITMASK_ARB_DISABLE                0x0001
@@ -844,10 +891,37 @@ struct acpi_bit_register_info {
 #define ACPI_BITPOSITION_SCI_ENABLE             0x00
 #define ACPI_BITPOSITION_BUS_MASTER_RLD         0x01
 #define ACPI_BITPOSITION_GLOBAL_LOCK_RELEASE    0x02
-#define ACPI_BITPOSITION_SLEEP_TYPE_X           0x0A
+#define ACPI_BITPOSITION_SLEEP_TYPE             0x0A
 #define ACPI_BITPOSITION_SLEEP_ENABLE           0x0D
 
 #define ACPI_BITPOSITION_ARB_DISABLE            0x00
+
+/* Structs and definitions for _OSI support and I/O port validation */
+
+#define ACPI_OSI_WIN_2000               0x01
+#define ACPI_OSI_WIN_XP                 0x02
+#define ACPI_OSI_WIN_XP_SP1             0x03
+#define ACPI_OSI_WINSRV_2003            0x04
+#define ACPI_OSI_WIN_XP_SP2             0x05
+#define ACPI_OSI_WINSRV_2003_SP1        0x06
+#define ACPI_OSI_WIN_VISTA              0x07
+#define ACPI_OSI_WINSRV_2008            0x08
+#define ACPI_OSI_WIN_VISTA_SP1          0x09
+#define ACPI_OSI_WIN_7                  0x0A
+
+#define ACPI_ALWAYS_ILLEGAL             0x00
+
+struct acpi_interface_info {
+	char *name;
+	u8 value;
+};
+
+struct acpi_port_info {
+	char *name;
+	u16 start;
+	u16 end;
+	u8 osi_dependency;
+};
 
 /*****************************************************************************
  *

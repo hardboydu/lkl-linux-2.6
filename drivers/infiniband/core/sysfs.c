@@ -66,11 +66,6 @@ struct port_table_attribute {
 	int			index;
 };
 
-static inline int ibdev_is_alive(const struct ib_device *dev)
-{
-	return dev->reg_state == IB_DEV_REGISTERED;
-}
-
 static ssize_t port_attr_show(struct kobject *kobj,
 			      struct attribute *attr, char *buf)
 {
@@ -80,13 +75,11 @@ static ssize_t port_attr_show(struct kobject *kobj,
 
 	if (!port_attr->show)
 		return -EIO;
-	if (!ibdev_is_alive(p->ibdev))
-		return -ENODEV;
 
 	return port_attr->show(p, port_attr, buf);
 }
 
-static struct sysfs_ops port_sysfs_ops = {
+static const struct sysfs_ops port_sysfs_ops = {
 	.show = port_attr_show
 };
 
@@ -468,6 +461,7 @@ alloc_group_attrs(ssize_t (*show)(struct ib_port *,
 		element->attr.attr.mode  = S_IRUGO;
 		element->attr.show       = show;
 		element->index		 = i;
+		sysfs_attr_init(&element->attr.attr);
 
 		tab_attr[i] = &element->attr.attr;
 	}
@@ -481,7 +475,9 @@ err:
 	return NULL;
 }
 
-static int add_port(struct ib_device *device, int port_num)
+static int add_port(struct ib_device *device, int port_num,
+		    int (*port_callback)(struct ib_device *,
+					 u8, struct kobject *))
 {
 	struct ib_port *p;
 	struct ib_port_attr attr;
@@ -528,10 +524,19 @@ static int add_port(struct ib_device *device, int port_num)
 	if (ret)
 		goto err_free_pkey;
 
+	if (port_callback) {
+		ret = port_callback(device, port_num, &p->kobj);
+		if (ret)
+			goto err_remove_pkey;
+	}
+
 	list_add_tail(&p->kobj.entry, &device->port_list);
 
 	kobject_uevent(&p->kobj, KOBJ_ADD);
 	return 0;
+
+err_remove_pkey:
+	sysfs_remove_group(&p->kobj, &p->pkey_group);
 
 err_free_pkey:
 	for (i = 0; i < attr.pkey_tbl_len; ++i)
@@ -562,9 +567,6 @@ static ssize_t show_node_type(struct device *device,
 {
 	struct ib_device *dev = container_of(device, struct ib_device, dev);
 
-	if (!ibdev_is_alive(dev))
-		return -ENODEV;
-
 	switch (dev->node_type) {
 	case RDMA_NODE_IB_CA:	  return sprintf(buf, "%d: CA\n", dev->node_type);
 	case RDMA_NODE_RNIC:	  return sprintf(buf, "%d: RNIC\n", dev->node_type);
@@ -581,9 +583,6 @@ static ssize_t show_sys_image_guid(struct device *device,
 	struct ib_device_attr attr;
 	ssize_t ret;
 
-	if (!ibdev_is_alive(dev))
-		return -ENODEV;
-
 	ret = ib_query_device(dev, &attr);
 	if (ret)
 		return ret;
@@ -599,9 +598,6 @@ static ssize_t show_node_guid(struct device *device,
 			      struct device_attribute *attr, char *buf)
 {
 	struct ib_device *dev = container_of(device, struct ib_device, dev);
-
-	if (!ibdev_is_alive(dev))
-		return -ENODEV;
 
 	return sprintf(buf, "%04x:%04x:%04x:%04x\n",
 		       be16_to_cpu(((__be16 *) &dev->node_guid)[0]),
@@ -769,16 +765,18 @@ static struct attribute_group iw_stats_group = {
 	.attrs	= iw_proto_stats_attrs,
 };
 
-int ib_device_register_sysfs(struct ib_device *device)
+int ib_device_register_sysfs(struct ib_device *device,
+			     int (*port_callback)(struct ib_device *,
+						  u8, struct kobject *))
 {
 	struct device *class_dev = &device->dev;
 	int ret;
 	int i;
 
 	class_dev->class      = &ib_class;
-	class_dev->driver_data = device;
 	class_dev->parent     = device->dma_device;
 	dev_set_name(class_dev, device->name);
+	dev_set_drvdata(class_dev, device);
 
 	INIT_LIST_HEAD(&device->port_list);
 
@@ -800,12 +798,12 @@ int ib_device_register_sysfs(struct ib_device *device)
 	}
 
 	if (device->node_type == RDMA_NODE_IB_SWITCH) {
-		ret = add_port(device, 0);
+		ret = add_port(device, 0, port_callback);
 		if (ret)
 			goto err_put;
 	} else {
 		for (i = 1; i <= device->phys_port_cnt; ++i) {
-			ret = add_port(device, i);
+			ret = add_port(device, i, port_callback);
 			if (ret)
 				goto err_put;
 		}
@@ -847,6 +845,9 @@ void ib_device_unregister_sysfs(struct ib_device *device)
 {
 	struct kobject *p, *t;
 	struct ib_port *port;
+
+	/* Hold kobject until ib_dealloc_device() */
+	kobject_get(&device->dev.kobj);
 
 	list_for_each_entry_safe(p, t, &device->port_list, entry) {
 		list_del(&p->entry);

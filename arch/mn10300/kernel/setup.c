@@ -15,7 +15,6 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
@@ -30,7 +29,7 @@
 #include <asm/setup.h>
 #include <asm/io.h>
 #include <asm/smp.h>
-#include <asm/proc/proc.h>
+#include <proc/proc.h>
 #include <asm/busctl-regs.h>
 #include <asm/fpu.h>
 #include <asm/sections.h>
@@ -135,10 +134,6 @@ void __init setup_arch(char **cmdline_p)
 	code_resource.end = virt_to_bus(&_etext)-1;
 	data_resource.start = virt_to_bus(&_etext);
 	data_resource.end = virt_to_bus(&_edata)-1;
-
-#define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
 
 	start_pfn = (CONFIG_KERNEL_RAM_BASE_ADDRESS >> PAGE_SHIFT);
 	kstart_pfn = PFN_UP(__pa(&_text));
@@ -289,7 +284,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

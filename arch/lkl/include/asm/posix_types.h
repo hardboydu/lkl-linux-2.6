@@ -10,12 +10,17 @@
 #define _ASM_LKL_POSIX_TYPES_H
 
 #include <asm/types.h>
+#include <asm/target.h>
 
 /*
  * This file is generally used by user-level software, so you need to
  * be a little careful about namespace pollution etc.  Also, we cannot
  * assume GCC is being used.
  */
+
+#ifndef BITS_PER_LONG
+#error "BITS_PER_LONG not defined"
+#endif /* BITS_PER_LONG */
 
 typedef unsigned long	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
@@ -56,7 +61,7 @@ typedef __kernel_uid_t	__kernel_old_uid_t;
 typedef __kernel_gid_t	__kernel_old_gid_t;
 typedef unsigned int	__kernel_old_dev_t;
 
-#ifdef __GNUC__
+#if defined(__GNUC__) || defined(_MSC_VER)
 typedef long long      __kernel_loff_t;
 #endif
 

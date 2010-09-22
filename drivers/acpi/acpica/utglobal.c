@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2010, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -90,7 +90,15 @@ const char *acpi_gbl_sleep_state_names[ACPI_S_STATE_COUNT] = {
 	"\\_S5_"
 };
 
-const char *acpi_gbl_highest_dstate_names[4] = {
+const char *acpi_gbl_lowest_dstate_names[ACPI_NUM_sx_w_METHODS] = {
+	"_S0W",
+	"_S1W",
+	"_S2W",
+	"_S3W",
+	"_S4W"
+};
+
+const char *acpi_gbl_highest_dstate_names[ACPI_NUM_sx_d_METHODS] = {
 	"_S1D",
 	"_S2D",
 	"_S3D",
@@ -226,7 +234,7 @@ static const char acpi_gbl_hex_to_ascii[] = {
  *
  ******************************************************************************/
 
-char acpi_ut_hex_to_ascii_char(acpi_integer integer, u32 position)
+char acpi_ut_hex_to_ascii_char(u64 integer, u32 position)
 {
 
 	return (acpi_gbl_hex_to_ascii[(integer >> position) & 0xF]);
@@ -294,12 +302,9 @@ struct acpi_bit_register_info acpi_gbl_bit_register_info[ACPI_NUM_BITREG] = {
 	/* ACPI_BITREG_GLOBAL_LOCK_RELEASE  */ {ACPI_REGISTER_PM1_CONTROL,
 						ACPI_BITPOSITION_GLOBAL_LOCK_RELEASE,
 						ACPI_BITMASK_GLOBAL_LOCK_RELEASE},
-	/* ACPI_BITREG_SLEEP_TYPE_A         */ {ACPI_REGISTER_PM1_CONTROL,
-						ACPI_BITPOSITION_SLEEP_TYPE_X,
-						ACPI_BITMASK_SLEEP_TYPE_X},
-	/* ACPI_BITREG_SLEEP_TYPE_B         */ {ACPI_REGISTER_PM1_CONTROL,
-						ACPI_BITPOSITION_SLEEP_TYPE_X,
-						ACPI_BITMASK_SLEEP_TYPE_X},
+	/* ACPI_BITREG_SLEEP_TYPE           */ {ACPI_REGISTER_PM1_CONTROL,
+						ACPI_BITPOSITION_SLEEP_TYPE,
+						ACPI_BITMASK_SLEEP_TYPE},
 	/* ACPI_BITREG_SLEEP_ENABLE         */ {ACPI_REGISTER_PM1_CONTROL,
 						ACPI_BITPOSITION_SLEEP_ENABLE,
 						ACPI_BITMASK_SLEEP_ENABLE},
@@ -354,6 +359,7 @@ const char *acpi_gbl_region_types[ACPI_NUM_PREDEFINED_REGIONS] = {
 	"SMBus",
 	"SystemCMOS",
 	"PCIBARTarget",
+	"IPMI",
 	"DataTable"
 };
 
@@ -476,7 +482,7 @@ char *acpi_ut_get_object_type_name(union acpi_operand_object *obj_desc)
 		return ("[NULL Object Descriptor]");
 	}
 
-	return (acpi_ut_get_type_name(ACPI_GET_OBJECT_TYPE(obj_desc)));
+	return (acpi_ut_get_type_name(obj_desc->common.type));
 }
 
 /*******************************************************************************
@@ -749,7 +755,10 @@ acpi_status acpi_ut_init_globals(void)
 	for (i = 0; i < ACPI_NUM_OWNERID_MASKS; i++) {
 		acpi_gbl_owner_id_mask[i] = 0;
 	}
-	acpi_gbl_owner_id_mask[ACPI_NUM_OWNERID_MASKS - 1] = 0x80000000;	/* Last ID is never valid */
+
+	/* Last owner_iD is never valid */
+
+	acpi_gbl_owner_id_mask[ACPI_NUM_OWNERID_MASKS - 1] = 0x80000000;
 
 	/* GPE support */
 
@@ -776,6 +785,7 @@ acpi_status acpi_ut_init_globals(void)
 
 	/* Miscellaneous variables */
 
+	acpi_gbl_DSDT = NULL;
 	acpi_gbl_cm_single_step = FALSE;
 	acpi_gbl_db_terminate_threads = FALSE;
 	acpi_gbl_shutdown = FALSE;
@@ -789,6 +799,7 @@ acpi_status acpi_ut_init_globals(void)
 	acpi_gbl_trace_dbg_layer = 0;
 	acpi_gbl_debugger_configuration = DEBUGGER_THREADING;
 	acpi_gbl_db_output_flags = ACPI_DB_CONSOLE_OUTPUT;
+	acpi_gbl_osi_data = 0;
 
 	/* Hardware oriented */
 
@@ -797,6 +808,7 @@ acpi_status acpi_ut_init_globals(void)
 
 	/* Namespace */
 
+	acpi_gbl_module_code_list = NULL;
 	acpi_gbl_root_node = NULL;
 	acpi_gbl_root_node_struct.name.integer = ACPI_ROOT_NAME;
 	acpi_gbl_root_node_struct.descriptor_type = ACPI_DESC_TYPE_NAMED;

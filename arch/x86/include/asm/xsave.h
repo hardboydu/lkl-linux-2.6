@@ -7,6 +7,7 @@
 
 #define XSTATE_FP	0x1
 #define XSTATE_SSE	0x2
+#define XSTATE_YMM	0x4
 
 #define XSTATE_FPSSE	(XSTATE_FP | XSTATE_SSE)
 
@@ -15,7 +16,7 @@
 /*
  * These are the features that the OS can handle currently.
  */
-#define XCNTXT_MASK	(XSTATE_FP | XSTATE_SSE)
+#define XCNTXT_MASK	(XSTATE_FP | XSTATE_SSE | XSTATE_YMM)
 
 #ifdef CONFIG_X86_64
 #define REX_PREFIX	"0x48, "
@@ -26,16 +27,19 @@
 extern unsigned int xstate_size;
 extern u64 pcntxt_mask;
 extern struct xsave_struct *init_xstate_buf;
+extern u64 xstate_fx_sw_bytes[USER_XSTATE_FX_SW_WORDS];
 
 extern void xsave_cntxt_init(void);
 extern void xsave_init(void);
+extern void update_regset_xstate_info(unsigned int size, u64 xstate_mask);
 extern int init_fpu(struct task_struct *child);
 extern int check_for_xstate(struct i387_fxsave_struct __user *buf,
 			    void __user *fpstate,
 			    struct _fpx_sw_bytes *sw);
 
-static inline int xrstor_checking(struct xsave_struct *fx)
+static inline int fpu_xrstor_checking(struct fpu *fpu)
 {
+	struct xsave_struct *fx = &fpu->state->xsave;
 	int err;
 
 	asm volatile("1: .byte " REX_PREFIX "0x0f,0xae,0x2f\n\t"
@@ -107,12 +111,12 @@ static inline void xrstor_state(struct xsave_struct *fx, u64 mask)
 		     :   "memory");
 }
 
-static inline void xsave(struct task_struct *tsk)
+static inline void fpu_xsave(struct fpu *fpu)
 {
 	/* This, however, we can work around by forcing the compiler to select
 	   an addressing mode that doesn't require extended registers. */
 	__asm__ __volatile__(".byte " REX_PREFIX "0x0f,0xae,0x27"
-			     : : "D" (&(tsk->thread.xstate->xsave)),
+			     : : "D" (&(fpu->state->xsave)),
 				 "a" (-1), "d"(-1) : "memory");
 }
 #endif

@@ -23,6 +23,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #define HISAX_STATUS_BUFSIZE 4096
 
 /*
@@ -360,12 +361,6 @@ module_param_array(io1, int, NULL, 0);
 #endif /* MODULE */
 
 int nrcards;
-
-extern const char *l1_revision;
-extern const char *l2_revision;
-extern const char *l3_revision;
-extern const char *lli_revision;
-extern const char *tei_revision;
 
 char *HiSax_getrev(const char *revision)
 {

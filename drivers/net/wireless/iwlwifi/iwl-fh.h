@@ -5,7 +5,7 @@
  *
  * GPL LICENSE SUMMARY
  *
- * Copyright(c) 2005 - 2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 2005 - 2010 Intel Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -30,7 +30,7 @@
  *
  * BSD LICENSE
  *
- * Copyright(c) 2005 - 2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 2005 - 2010 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -379,6 +379,25 @@
 
 #define FH_TSSR_TX_STATUS_REG		(FH_TSSR_LOWER_BOUND + 0x010)
 
+/**
+ * Bit fields for TSSR(Tx Shared Status & Control) error status register:
+ * 31:  Indicates an address error when accessed to internal memory
+ *	uCode/driver must write "1" in order to clear this flag
+ * 30:  Indicates that Host did not send the expected number of dwords to FH
+ *	uCode/driver must write "1" in order to clear this flag
+ * 16-9:Each status bit is for one channel. Indicates that an (Error) ActDMA
+ *	command was received from the scheduler while the TRB was already full
+ *	with previous command
+ *	uCode/driver must write "1" in order to clear this flag
+ * 7-0: Each status bit indicates a channel's TxCredit error. When an error
+ *	bit is set, it indicates that the FH has received a full indication
+ *	from the RTC TxFIFO and the current value of the TxCredit counter was
+ *	not equal to zero. This mean that the credit mechanism was not
+ *	synchronized to the TxFIFO status
+ *	uCode/driver must write "1" in order to clear this flag
+ */
+#define FH_TSSR_TX_ERROR_REG		(FH_TSSR_LOWER_BOUND + 0x018)
+
 #define FH_TSSR_TX_STATUS_REG_BIT_BUFS_EMPTY(_chnl) ((1 << (_chnl)) << 24)
 #define FH_TSSR_TX_STATUS_REG_BIT_NO_PEND_REQ(_chnl) ((1 << (_chnl)) << 16)
 
@@ -399,6 +418,21 @@
  */
 #define FH_TX_CHICKEN_BITS_SCD_AUTO_RETRY_EN	(0x00000002)
 
+#define RX_QUEUE_SIZE                         256
+#define RX_QUEUE_MASK                         255
+#define RX_QUEUE_SIZE_LOG                     8
+
+/*
+ * RX related structures and functions
+ */
+#define RX_FREE_BUFFERS 64
+#define RX_LOW_WATERMARK 8
+
+/* Size of one Rx buffer in host DRAM */
+#define IWL_RX_BUF_SIZE_3K (3 * 1000) /* 3945 only */
+#define IWL_RX_BUF_SIZE_4K (4 * 1024)
+#define IWL_RX_BUF_SIZE_8K (8 * 1024)
+
 /**
  * struct iwl_rb_status - reseve buffer status
  * 	host memory mapped FH registers
@@ -414,6 +448,7 @@ struct iwl_rb_status {
 	__le16 closed_fr_num;
 	__le16 finished_rb_num;
 	__le16 finished_fr_nam;
+	__le32 __unused; /* 3945 only */
 } __attribute__ ((packed));
 
 
@@ -476,7 +511,6 @@ struct iwl_tfd {
 	struct iwl_tfd_tb tbs[IWL_NUM_OF_TBS];
 	__le32 __pad;
 } __attribute__ ((packed));
-
 
 /* Keep Warm Size */
 #define IWL_KW_SIZE 0x1000	/* 4k */

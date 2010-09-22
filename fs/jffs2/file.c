@@ -10,7 +10,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/time.h>
 #include <linux/pagemap.h>
@@ -27,9 +26,9 @@ static int jffs2_write_begin(struct file *filp, struct address_space *mapping,
 			struct page **pagep, void **fsdata);
 static int jffs2_readpage (struct file *filp, struct page *pg);
 
-int jffs2_fsync(struct file *filp, struct dentry *dentry, int datasync)
+int jffs2_fsync(struct file *filp, int datasync)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = filp->f_mapping->host;
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(inode->i_sb);
 
 	/* Trigger GC to flush any pending writes for this inode */
@@ -56,7 +55,7 @@ const struct file_operations jffs2_file_operations =
 
 const struct inode_operations jffs2_file_inode_operations =
 {
-	.permission =	jffs2_permission,
+	.check_acl =	jffs2_check_acl,
 	.setattr =	jffs2_setattr,
 	.setxattr =	jffs2_setxattr,
 	.getxattr =	jffs2_getxattr,
@@ -99,7 +98,7 @@ static int jffs2_do_readpage_nolock (struct inode *inode, struct page *pg)
 	kunmap(pg);
 
 	D2(printk(KERN_DEBUG "readpage finished\n"));
-	return 0;
+	return ret;
 }
 
 int jffs2_do_readpage_unlock(struct inode *inode, struct page *pg)

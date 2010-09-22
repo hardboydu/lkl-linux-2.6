@@ -24,6 +24,7 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/time.h>
+#include <linux/slab.h>
 #include <linux/moduleparam.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
@@ -48,7 +49,7 @@ MODULE_PARM_DESC(id, "ID string for SiS7019 Audio Accelerator.");
 module_param(enable, bool, 0444);
 MODULE_PARM_DESC(enable, "Enable SiS7019 Audio Accelerator.");
 
-static struct pci_device_id snd_sis7019_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_sis7019_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x7019) },
 	{ 0, }
 };
@@ -1300,7 +1301,7 @@ static int __devinit sis_chip_create(struct snd_card *card,
 	if (rc)
 		goto error_out;
 
-	if (pci_set_dma_mask(pci, DMA_30BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(30)) < 0) {
 		printk(KERN_ERR "sis7019: architecture does not support "
 					"30-bit PCI busmaster DMA");
 		goto error_out_enabled;
@@ -1387,9 +1388,8 @@ static int __devinit snd_sis7019_probe(struct pci_dev *pci,
 	if (!enable)
 		goto error_out;
 
-	rc = -ENOMEM;
-	card = snd_card_new(index, id, THIS_MODULE, sizeof(*sis));
-	if (!card)
+	rc = snd_card_create(index, id, THIS_MODULE, sizeof(*sis), &card);
+	if (rc < 0)
 		goto error_out;
 
 	strcpy(card->driver, "SiS7019");

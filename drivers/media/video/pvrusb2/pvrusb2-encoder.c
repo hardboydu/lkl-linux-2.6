@@ -294,7 +294,10 @@ static int pvr2_encoder_cmd(void *ctxt,
 			pvr2_trace(
 				PVR2_TRACE_ERROR_LEGS,
 				"Giving up on command."
-				"  This is normally recovered by the driver.");
+				"  This is normally recovered via a firmware"
+				" reload and re-initialization; concern"
+				" is only warranted if this happens repeatedly"
+				" and rapidly.");
 			break;
 		}
 		wrData[0] = 0x7;
@@ -347,7 +350,7 @@ static int pvr2_encoder_prep_config(struct pvr2_hdw *hdw)
 	int encMisc3Arg = 0;
 
 #if 0
-	/* This inexplicable bit happens in the Hauppage windows
+	/* This inexplicable bit happens in the Hauppauge windows
 	   driver (for both 24xxx and 29xxx devices).  However I
 	   currently see no difference in behavior with or without
 	   this stuff.  Leave this here as a note of its existence,

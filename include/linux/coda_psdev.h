@@ -6,6 +6,9 @@
 #define CODA_PSDEV_MAJOR 67
 #define MAX_CODADEVS  5	   /* how many do we allow */
 
+#ifdef __KERNEL__
+#include <linux/backing-dev.h>
+
 struct kstatfs;
 
 /* communication pending/processing queues */
@@ -16,6 +19,7 @@ struct venus_comm {
 	struct list_head    vc_processing;
 	int                 vc_inuse;
 	struct super_block *vc_sb;
+	struct backing_dev_info bdi;
 };
 
 
@@ -23,7 +27,6 @@ static inline struct venus_comm *coda_vcp(struct super_block *sb)
 {
 	return (struct venus_comm *)((sb)->s_fs_info);
 }
-
 
 /* upcalls */
 int venus_rootfid(struct super_block *sb, struct CodaFid *fidp);
@@ -64,6 +67,12 @@ int coda_downcall(int opcode, union outputArgs *out, struct super_block *sb);
 int venus_fsync(struct super_block *sb, struct CodaFid *fid);
 int venus_statfs(struct dentry *dentry, struct kstatfs *sfs);
 
+/*
+ * Statistics
+ */
+
+extern struct venus_comm coda_comms[];
+#endif /* __KERNEL__ */
 
 /* messages between coda filesystem in kernel and Venus */
 struct upc_req {
@@ -81,12 +90,5 @@ struct upc_req {
 #define REQ_READ   0x2
 #define REQ_WRITE  0x4
 #define REQ_ABORT  0x8
-
-
-/*
- * Statistics
- */
-
-extern struct venus_comm coda_comms[];
 
 #endif

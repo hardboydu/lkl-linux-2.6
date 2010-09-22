@@ -111,10 +111,12 @@
 #include <linux/compiler.h>
 #include <linux/prefetch.h>
 #include <linux/ethtool.h>
+#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/if_vlan.h>
 #include <linux/rtnetlink.h>
 #include <linux/jiffies.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -409,7 +411,7 @@ static int lnksts = 0;		/* CFG_LNKSTS bit polarity */
 struct rx_info {
 	spinlock_t	lock;
 	int		up;
-	long		idle;
+	unsigned long	idle;
 
 	struct sk_buff	*skbs[NR_RX_DESC];
 
@@ -647,8 +649,8 @@ static void phy_intr(struct net_device *ndev)
 		dprintk("phy_intr: tbisr=%08x, tanar=%08x, tanlpar=%08x\n",
 			tbisr, tanar, tanlpar);
 
-		if ( (fullduplex = (tanlpar & TANAR_FULL_DUP)
-		      && (tanar & TANAR_FULL_DUP)) ) {
+		if ( (fullduplex = (tanlpar & TANAR_FULL_DUP) &&
+		      (tanar & TANAR_FULL_DUP)) ) {
 
 			/* both of us are full duplex */
 			writel(readl(dev->base + TXCFG)
@@ -660,12 +662,12 @@ static void phy_intr(struct net_device *ndev)
 			writel(readl(dev->base + GPIOR) | GPIOR_GP1_OUT,
 			       dev->base + GPIOR);
 
-		} else if(((tanlpar & TANAR_HALF_DUP)
-			   && (tanar & TANAR_HALF_DUP))
-			|| ((tanlpar & TANAR_FULL_DUP)
-			    && (tanar & TANAR_HALF_DUP))
-			|| ((tanlpar & TANAR_HALF_DUP)
-			    && (tanar & TANAR_FULL_DUP))) {
+		} else if (((tanlpar & TANAR_HALF_DUP) &&
+			    (tanar & TANAR_HALF_DUP)) ||
+			   ((tanlpar & TANAR_FULL_DUP) &&
+			    (tanar & TANAR_HALF_DUP)) ||
+			   ((tanlpar & TANAR_HALF_DUP) &&
+			    (tanar & TANAR_FULL_DUP))) {
 
 			/* one or both of us are half duplex */
 			writel((readl(dev->base + TXCFG)
@@ -719,16 +721,16 @@ static void phy_intr(struct net_device *ndev)
 
 	newlinkstate = (cfg & CFG_LNKSTS) ? LINK_UP : LINK_DOWN;
 
-	if (newlinkstate & LINK_UP
-	    && dev->linkstate != newlinkstate) {
+	if (newlinkstate & LINK_UP &&
+	    dev->linkstate != newlinkstate) {
 		netif_start_queue(ndev);
 		netif_wake_queue(ndev);
 		printk(KERN_INFO "%s: link now %s mbps, %s duplex and up.\n",
 			ndev->name,
 			speeds[speed],
 			fullduplex ? "full" : "half");
-	} else if (newlinkstate & LINK_DOWN
-		   && dev->linkstate != newlinkstate) {
+	} else if (newlinkstate & LINK_DOWN &&
+		   dev->linkstate != newlinkstate) {
 		netif_stop_queue(ndev);
 		printk(KERN_INFO "%s: link now down.\n", ndev->name);
 	}
@@ -822,8 +824,7 @@ static void ns83820_cleanup_rx(struct ns83820 *dev)
 		struct sk_buff *skb = dev->rx_info.skbs[i];
 		dev->rx_info.skbs[i] = NULL;
 		clear_rx_desc(dev, i);
-		if (skb)
-			kfree_skb(skb);
+		kfree_skb(skb);
 	}
 }
 
@@ -1078,7 +1079,8 @@ static void ns83820_cleanup_tx(struct ns83820 *dev)
  * while trying to track down a bug in either the zero copy code or
  * the tx fifo (hence the MAX_FRAG_LEN).
  */
-static int ns83820_hard_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+static netdev_tx_t ns83820_hard_start_xmit(struct sk_buff *skb,
+					   struct net_device *ndev)
 {
 	struct ns83820 *dev = PRIV(ndev);
 	u32 free_idx, cmdsts, extsts;
@@ -1098,7 +1100,7 @@ again:
 	if (unlikely(dev->CFG_cache & CFG_LNKSTS)) {
 		netif_stop_queue(ndev);
 		if (unlikely(dev->CFG_cache & CFG_LNKSTS))
-			return 1;
+			return NETDEV_TX_BUSY;
 		netif_start_queue(ndev);
 	}
 
@@ -1116,7 +1118,7 @@ again:
 			netif_start_queue(ndev);
 			goto again;
 		}
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	if (free_idx == dev->tx_intr_idx) {
@@ -1205,9 +1207,7 @@ again:
 	if (stopped && (dev->tx_done_idx != tx_done_idx) && start_tx_okay(dev))
 		netif_start_queue(ndev);
 
-	/* set the transmit start time to catch transmit timeouts */
-	ndev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void ns83820_update_stats(struct ns83820 *dev)
@@ -1627,7 +1627,7 @@ static void ns83820_tx_watch(unsigned long data)
 		);
 #endif
 
-	if (time_after(jiffies, ndev->trans_start + 1*HZ) &&
+	if (time_after(jiffies, dev_trans_start(ndev) + 1*HZ) &&
 	    dev->tx_done_idx != dev->tx_free_idx) {
 		printk(KERN_DEBUG "%s: ns83820_tx_watch: %u %u %d\n",
 			ndev->name,
@@ -1720,7 +1720,7 @@ static void ns83820_set_multicast(struct net_device *ndev)
 	else
 		and_mask &= ~(RFCR_AAU | RFCR_AAM);
 
-	if (ndev->flags & IFF_ALLMULTI || ndev->mc_count)
+	if (ndev->flags & IFF_ALLMULTI || netdev_mc_count(ndev))
 		or_mask |= RFCR_AAM;
 	else
 		and_mask &= ~RFCR_AAM;
@@ -1974,9 +1974,9 @@ static int __devinit ns83820_init_one(struct pci_dev *pci_dev,
 
 	/* See if we can set the dma mask early on; failure is fatal. */
 	if (sizeof(dma_addr_t) == 8 &&
-	 	!pci_set_dma_mask(pci_dev, DMA_64BIT_MASK)) {
+		!pci_set_dma_mask(pci_dev, DMA_BIT_MASK(64))) {
 		using_dac = 1;
-	} else if (!pci_set_dma_mask(pci_dev, DMA_32BIT_MASK)) {
+	} else if (!pci_set_dma_mask(pci_dev, DMA_BIT_MASK(32))) {
 		using_dac = 0;
 	} else {
 		dev_warn(&pci_dev->dev, "pci_set_dma_mask failed!\n");
@@ -2293,7 +2293,7 @@ static void __devexit ns83820_remove_one(struct pci_dev *pci_dev)
 	pci_set_drvdata(pci_dev, NULL);
 }
 
-static struct pci_device_id ns83820_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(ns83820_pci_tbl) = {
 	{ 0x100b, 0x0022, PCI_ANY_ID, PCI_ANY_ID, 0, .driver_data = 0, },
 	{ 0, },
 };

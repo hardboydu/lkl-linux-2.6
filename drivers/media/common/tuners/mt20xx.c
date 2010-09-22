@@ -6,7 +6,8 @@
  */
 #include <linux/delay.h>
 #include <linux/i2c.h>
-#include <linux/videodev.h>
+#include <linux/slab.h>
+#include <linux/videodev2.h>
 #include "tuner-i2c.h"
 #include "mt20xx.h"
 

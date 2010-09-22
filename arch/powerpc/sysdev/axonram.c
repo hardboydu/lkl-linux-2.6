@@ -165,7 +165,7 @@ axon_ram_direct_access(struct block_device *device, sector_t sector,
 	return 0;
 }
 
-static struct block_device_operations axon_ram_devops = {
+static const struct block_device_operations axon_ram_devops = {
 	.owner		= THIS_MODULE,
 	.direct_access	= axon_ram_direct_access
 };
@@ -185,7 +185,7 @@ axon_ram_probe(struct of_device *device, const struct of_device_id *device_id)
 	axon_ram_bank_id++;
 
 	dev_info(&device->dev, "Found memory controller on %s\n",
-			device->node->full_name);
+			device->dev.of_node->full_name);
 
 	bank = kzalloc(sizeof(struct axon_ram_bank), GFP_KERNEL);
 	if (bank == NULL) {
@@ -198,7 +198,7 @@ axon_ram_probe(struct of_device *device, const struct of_device_id *device_id)
 
 	bank->device = device;
 
-	if (of_address_to_resource(device->node, 0, &resource) != 0) {
+	if (of_address_to_resource(device->dev.of_node, 0, &resource) != 0) {
 		dev_err(&device->dev, "Cannot access device tree\n");
 		rc = -EFAULT;
 		goto failed;
@@ -250,10 +250,10 @@ axon_ram_probe(struct of_device *device, const struct of_device_id *device_id)
 
 	set_capacity(bank->disk, bank->size >> AXON_RAM_SECTOR_SHIFT);
 	blk_queue_make_request(bank->disk->queue, axon_ram_make_request);
-	blk_queue_hardsect_size(bank->disk->queue, AXON_RAM_SECTOR_SIZE);
+	blk_queue_logical_block_size(bank->disk->queue, AXON_RAM_SECTOR_SIZE);
 	add_disk(bank->disk);
 
-	bank->irq_id = irq_of_parse_and_map(device->node, 0);
+	bank->irq_id = irq_of_parse_and_map(device->dev.of_node, 0);
 	if (bank->irq_id == NO_IRQ) {
 		dev_err(&device->dev, "Cannot access ECC interrupt ID\n");
 		rc = -EFAULT;
@@ -327,12 +327,12 @@ static struct of_device_id axon_ram_device_id[] = {
 };
 
 static struct of_platform_driver axon_ram_driver = {
-	.match_table	= axon_ram_device_id,
 	.probe		= axon_ram_probe,
 	.remove		= axon_ram_remove,
-	.driver		= {
-		.owner	= THIS_MODULE,
-		.name	= AXON_RAM_MODULE_NAME,
+	.driver = {
+		.name = AXON_RAM_MODULE_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = axon_ram_device_id,
 	},
 };
 

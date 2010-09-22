@@ -1,66 +1,33 @@
-#ifndef _ASM_LKL_IO_H
-#define _ASM_LKL_IO_H
+#ifndef __LKL_IO_H
+#define __LKL_IO_H
+
+#include <asm/page.h>
+
+#define IO_SPACE_LIMIT 0xdeadbeef /* Sure hope nothing uses this */
 
 
-static inline unsigned char readb(const volatile void __iomem *addr)
-{
-        BUG();
-	return *(volatile unsigned char __force *) addr;
-}
-static inline unsigned short readw(const volatile void __iomem *addr)
-{
-        BUG();
-	return *(volatile unsigned short __force *) addr;
-}
-static inline unsigned int readl(const volatile void __iomem *addr)
-{
-        BUG();
-	return *(volatile unsigned int __force *) addr;
-}
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
 
-static inline unsigned long long readq(void __iomem *addr)
-{
-        BUG();
-        return *(volatile unsigned long long __force *) addr;
-}
+/*
+ * Convert a virtual cached pointer to an uncached pointer
+ */
+#define xlate_dev_kmem_ptr(p)	(p)
 
-#define inb(x) readb((void*)x)
 
-static inline void writeb(unsigned char b, volatile void __iomem *addr)
+
+static inline unsigned long virt_to_phys(volatile void *address)
 {
-        BUG();
-	*(volatile unsigned char __force *) addr = b;
+	return __pa((unsigned long)address);
 }
 
-#define outb(c, i) writeb(c, (void*)addr)
-
-static inline void writew(unsigned short b, volatile void __iomem *addr)
+static inline void *phys_to_virt(unsigned long address)
 {
-        BUG();
-	*(volatile unsigned short __force *) addr = b;
-}
-static inline void writel(unsigned int b, volatile void __iomem *addr)
-{
-        BUG();
-	*(volatile unsigned int __force *) addr = b;
-}
-static inline void writeq(unsigned int b, volatile void __iomem *addr)
-{
-        BUG();
-	*(volatile unsigned long long __force *) addr = b;
+	return __va(address);
 }
 
-#define readq_relaxed readq
-#define readl_relaxed readl
-#define readw_relaxed readw
-#define readb_relaxed readb
 
-#define __raw_writeb writeb
-#define __raw_writew writew
-#define __raw_writel writel
-#define __raw_writeq writeq
-
-
-#define IO_SPACE_LIMIT 0
-
-#endif
+#endif /* __LKL_IO_H */

@@ -6,7 +6,7 @@
  *                         Dwaine Garden <dwainegarden@rogers.com>
  *
  *
- * Report problems to v4l MailingList : http://www.redhat.com/mailman/listinfo/video4linux-list
+ * Report problems to v4l MailingList: linux-media@vger.kernel.org
  *
  * This module is part of usbvision driver project.
  * Updates to driver completed by Dwaine P. Garden
@@ -35,7 +35,7 @@
 #include <linux/usb.h>
 #include <linux/i2c.h>
 #include <linux/mutex.h>
-#include <media/v4l2-common.h>
+#include <media/v4l2-device.h>
 #include <media/tuner.h>
 #include <linux/videodev2.h>
 
@@ -357,13 +357,12 @@ extern struct usbvision_device_data_st usbvision_device_data[];
 extern struct usb_device_id usbvision_table[];
 
 struct usb_usbvision {
+	struct v4l2_device v4l2_dev;
 	struct video_device *vdev;         				/* Video Device */
 	struct video_device *rdev;               			/* Radio Device */
-	struct video_device *vbi; 					/* VBI Device   */
 
 	/* i2c Declaration Section*/
 	struct i2c_adapter i2c_adap;
-	struct i2c_client i2c_client;
 
 	struct urb *ctrlUrb;
 	unsigned char ctrlUrbBuffer[8];
@@ -374,7 +373,6 @@ struct usb_usbvision {
 	/* configuration part */
 	int have_tuner;
 	int tuner_type;
-	int tuner_addr;
 	int bridgeType;							// NT1003, NT1004, NT1005
 	int radio;
 	int video_inputs;						// # of inputs
@@ -464,6 +462,13 @@ struct usb_usbvision {
 	int ComprBlockTypes[4];
 };
 
+static inline struct usb_usbvision *to_usbvision(struct v4l2_device *v4l2_dev)
+{
+	return container_of(v4l2_dev, struct usb_usbvision, v4l2_dev);
+}
+
+#define call_all(usbvision, o, f, args...) \
+	v4l2_device_call_all(&usbvision->v4l2_dev, 0, o, f, ##args)
 
 /* --------------------------------------------------------------- */
 /* defined in usbvision-i2c.c                                      */
@@ -475,7 +480,6 @@ struct usb_usbvision {
 /* ----------------------------------------------------------------------- */
 int usbvision_i2c_register(struct usb_usbvision *usbvision);
 int usbvision_i2c_unregister(struct usb_usbvision *usbvision);
-void call_i2c_clients(struct usb_usbvision *usbvision, unsigned int cmd,void *arg);
 
 /* defined in usbvision-core.c                                      */
 int usbvision_read_reg(struct usb_usbvision *usbvision, unsigned char reg);

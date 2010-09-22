@@ -152,7 +152,6 @@ static char *version =
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -405,7 +404,7 @@ static int     eth16i_read_eeprom_word(int ioaddr);
 static void    eth16i_eeprom_cmd(int ioaddr, unsigned char command);
 static int     eth16i_open(struct net_device *dev);
 static int     eth16i_close(struct net_device *dev);
-static int     eth16i_tx(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t eth16i_tx(struct sk_buff *skb, struct net_device *dev);
 static void    eth16i_rx(struct net_device *dev);
 static void    eth16i_timeout(struct net_device *dev);
 static irqreturn_t eth16i_interrupt(int irq, void *dev_id);
@@ -474,6 +473,17 @@ out:
 	return ERR_PTR(err);
 }
 #endif
+
+static const struct net_device_ops eth16i_netdev_ops = {
+	.ndo_open               = eth16i_open,
+	.ndo_stop               = eth16i_close,
+	.ndo_start_xmit    	= eth16i_tx,
+	.ndo_set_multicast_list = eth16i_multicast,
+	.ndo_tx_timeout 	= eth16i_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 {
@@ -549,12 +559,7 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 	BITCLR(ioaddr + CONFIG_REG_1, POWERUP);
 
 	/* Initialize the device structure */
-	memset(lp, 0, sizeof(struct eth16i_local));
-	dev->open               = eth16i_open;
-	dev->stop               = eth16i_close;
-	dev->hard_start_xmit    = eth16i_tx;
-	dev->set_multicast_list = eth16i_multicast;
-	dev->tx_timeout 	= eth16i_timeout;
+	dev->netdev_ops         = &eth16i_netdev_ops;
 	dev->watchdog_timeo	= TX_TIMEOUT;
 	spin_lock_init(&lp->lock);
 
@@ -1022,7 +1027,7 @@ static void eth16i_timeout(struct net_device *dev)
 	inw(ioaddr + TX_STATUS_REG),  (inb(ioaddr + TX_STATUS_REG) & TX_DONE) ?
 		       "IRQ conflict" : "network cable problem");
 
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 
 	/* Let's dump all registers */
 	if(eth16i_debug > 0) {
@@ -1042,12 +1047,12 @@ static void eth16i_timeout(struct net_device *dev)
 	}
 	dev->stats.tx_errors++;
 	eth16i_reset(dev);
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	outw(ETH16I_INTR_ON, ioaddr + TX_INTR_REG);
 	netif_wake_queue(dev);
 }
 
-static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct eth16i_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
@@ -1058,7 +1063,7 @@ static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 
 	if (length < ETH_ZLEN) {
 		if (skb_padto(skb, ETH_ZLEN))
-			return 0;
+			return NETDEV_TX_OK;
 		length = ETH_ZLEN;
 	}
 	buf = skb->data;
@@ -1104,7 +1109,6 @@ static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 		outb(TX_START | lp->tx_queue, ioaddr + TRANSMIT_START_REG);
 		lp->tx_queue = 0;
 		lp->tx_queue_len = 0;
-		dev->trans_start = jiffies;
 		lp->tx_started = 1;
 		netif_wake_queue(dev);
 	}
@@ -1120,7 +1124,7 @@ static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 	/* outb(TX_INTR_DONE | TX_INTR_16_COL, ioaddr + TX_INTR_REG); */
 	status = 0;
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void eth16i_rx(struct net_device *dev)
@@ -1353,7 +1357,7 @@ static void eth16i_multicast(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 
-	if(dev->mc_count || dev->flags&(IFF_ALLMULTI|IFF_PROMISC))
+	if (!netdev_mc_empty(dev) || dev->flags&(IFF_ALLMULTI|IFF_PROMISC))
 	{
 		outb(3, ioaddr + RECEIVE_MODE_REG);
 	} else {

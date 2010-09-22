@@ -56,7 +56,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
-#include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -265,7 +264,7 @@ static struct hpsb_highlevel sbp2_highlevel = {
 	.host_reset	= sbp2_host_reset,
 };
 
-const static struct hpsb_address_ops sbp2_ops = {
+static const struct hpsb_address_ops sbp2_ops = {
 	.write		= sbp2_handle_status_write
 };
 
@@ -275,7 +274,7 @@ static int sbp2_handle_physdma_write(struct hpsb_host *, int, int, quadlet_t *,
 static int sbp2_handle_physdma_read(struct hpsb_host *, int, quadlet_t *, u64,
 				    size_t, u16);
 
-const static struct hpsb_address_ops sbp2_physdma_ops = {
+static const struct hpsb_address_ops sbp2_physdma_ops = {
 	.read		= sbp2_handle_physdma_read,
 	.write		= sbp2_handle_physdma_write,
 };
@@ -285,7 +284,7 @@ const static struct hpsb_address_ops sbp2_physdma_ops = {
 /*
  * Interface to driver core and IEEE 1394 core
  */
-static struct ieee1394_device_id sbp2_id_table[] = {
+static const struct ieee1394_device_id sbp2_id_table[] = {
 	{
 	 .match_flags	= IEEE1394_MATCH_SPECIFIER_ID | IEEE1394_MATCH_VERSION,
 	 .specifier_id	= SBP2_UNIT_SPEC_ID_ENTRY & 0xffffff,
@@ -372,8 +371,7 @@ static const struct {
 	/* DViCO Momobay FX-3A with TSB42AA9A bridge */ {
 		.firmware_revision	= 0x002800,
 		.model			= 0x000000,
-		.workarounds		= SBP2_WORKAROUND_DELAY_INQUIRY |
-					  SBP2_WORKAROUND_POWER_CONDITION,
+		.workarounds		= SBP2_WORKAROUND_POWER_CONDITION,
 	},
 	/* Initio bridges, actually only needed for some older ones */ {
 		.firmware_revision	= 0x000200,
@@ -718,7 +716,7 @@ static int sbp2_remove(struct device *dev)
 	struct scsi_device *sdev;
 
 	ud = container_of(dev, struct unit_directory, device);
-	lu = ud->device.driver_data;
+	lu = dev_get_drvdata(&ud->device);
 	if (!lu)
 		return 0;
 
@@ -746,7 +744,7 @@ static int sbp2_remove(struct device *dev)
 
 static int sbp2_update(struct unit_directory *ud)
 {
-	struct sbp2_lu *lu = ud->device.driver_data;
+	struct sbp2_lu *lu = dev_get_drvdata(&ud->device);
 
 	if (sbp2_reconnect_device(lu) != 0) {
 		/*
@@ -815,7 +813,7 @@ static struct sbp2_lu *sbp2_alloc_device(struct unit_directory *ud)
 	atomic_set(&lu->state, SBP2LU_STATE_RUNNING);
 	INIT_WORK(&lu->protocol_work, NULL);
 
-	ud->device.driver_data = lu;
+	dev_set_drvdata(&ud->device, lu);
 
 	hi = hpsb_get_hostinfo(&sbp2_highlevel, ud->ne->host);
 	if (!hi) {
@@ -880,6 +878,7 @@ static struct sbp2_lu *sbp2_alloc_device(struct unit_directory *ud)
 	}
 
 	shost->hostdata[0] = (unsigned long)lu;
+	shost->max_cmd_len = SBP2_MAX_CDB_SIZE;
 
 	if (!scsi_add_host(shost, &ud->device)) {
 		lu->shost = shost;
@@ -1051,7 +1050,7 @@ static void sbp2_remove_device(struct sbp2_lu *lu)
 		hpsb_unregister_addrspace(&sbp2_highlevel, hi->host,
 					  lu->status_fifo_addr);
 
-	lu->ud->device.driver_data = NULL;
+	dev_set_drvdata(&lu->ud->device, NULL);
 
 	module_put(hi->host->driver->owner);
 no_hi:
@@ -1413,8 +1412,7 @@ static void sbp2_parse_unit_directory(struct sbp2_lu *lu,
 			  "(firmware_revision 0x%06x, vendor_id 0x%06x,"
 			  " model_id 0x%06x)",
 			  NODE_BUS_ARGS(ud->ne->host, ud->ne->nodeid),
-			  workarounds, firmware_revision,
-			  ud->vendor_id ? ud->vendor_id : ud->ne->vendor_id,
+			  workarounds, firmware_revision, ud->vendor_id,
 			  model);
 
 	/* We would need one SCSI host template for each target to adjust
@@ -2021,7 +2019,7 @@ static int sbp2scsi_slave_configure(struct scsi_device *sdev)
 	if (lu->workarounds & SBP2_WORKAROUND_POWER_CONDITION)
 		sdev->start_stop_pwr_cond = 1;
 	if (lu->workarounds & SBP2_WORKAROUND_128K_MAX_TRANS)
-		blk_queue_max_sectors(sdev->request_queue, 128 * 1024 / 512);
+		blk_queue_max_hw_sectors(sdev->request_queue, 128 * 1024 / 512);
 
 	blk_queue_max_segment_size(sdev->request_queue, SBP2_MAX_SEG_SIZE);
 	return 0;

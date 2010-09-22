@@ -280,8 +280,7 @@ out:
 	return cpu;
 }
 
-void
-mask_irq(int irq)
+void crisv32_mask_irq(int irq)
 {
 	int cpu;
 
@@ -289,8 +288,7 @@ mask_irq(int irq)
 		block_irq(irq, cpu);
 }
 
-void
-unmask_irq(int irq)
+void crisv32_unmask_irq(int irq)
 {
 	unblock_irq(irq, irq_cpu(irq));
 }
@@ -298,23 +296,23 @@ unmask_irq(int irq)
 
 static unsigned int startup_crisv32_irq(unsigned int irq)
 {
-	unmask_irq(irq);
+	crisv32_unmask_irq(irq);
 	return 0;
 }
 
 static void shutdown_crisv32_irq(unsigned int irq)
 {
-	mask_irq(irq);
+	crisv32_mask_irq(irq);
 }
 
 static void enable_crisv32_irq(unsigned int irq)
 {
-	unmask_irq(irq);
+	crisv32_unmask_irq(irq);
 }
 
 static void disable_crisv32_irq(unsigned int irq)
 {
-	mask_irq(irq);
+	crisv32_mask_irq(irq);
 }
 
 static void ack_crisv32_irq(unsigned int irq)
@@ -325,16 +323,18 @@ static void end_crisv32_irq(unsigned int irq)
 {
 }
 
-void set_affinity_crisv32_irq(unsigned int irq, const struct cpumask *dest)
+int set_affinity_crisv32_irq(unsigned int irq, const struct cpumask *dest)
 {
 	unsigned long flags;
 	spin_lock_irqsave(&irq_lock, flags);
 	irq_allocations[irq - FIRST_IRQ].mask = *dest;
 	spin_unlock_irqrestore(&irq_lock, flags);
+
+	return 0;
 }
 
-static struct hw_interrupt_type crisv32_irq_type = {
-	.typename =    "CRISv32",
+static struct irq_chip crisv32_irq_type = {
+	.name =        "CRISv32",
 	.startup =     startup_crisv32_irq,
 	.shutdown =    shutdown_crisv32_irq,
 	.enable =      enable_crisv32_irq,
@@ -428,8 +428,8 @@ crisv32_do_multiple(struct pt_regs* regs)
 			 masked[i] &= ~TIMER_MASK;
 			 do_IRQ(TIMER0_INTR_VECT, regs);
 		}
-	}
 #endif
+	}
 
 #ifdef IGNORE_MASK
 	/* Remove IRQs that can't be handled as multiple. */

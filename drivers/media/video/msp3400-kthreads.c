@@ -22,7 +22,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/freezer.h>
 #include <linux/videodev2.h>
@@ -188,7 +187,7 @@ void msp3400c_set_mode(struct i2c_client *client, int mode)
 {
 	struct msp_state *state = to_state(i2c_get_clientdata(client));
 	struct msp3400c_init_data_dem *data = &msp3400c_init_data[mode];
-	int tuner = (state->routing.input >> 3) & 1;
+	int tuner = (state->route_in >> 3) & 1;
 	int i;
 
 	v4l_dbg(1, msp_debug, client, "set_mode: %d\n", mode);
@@ -896,7 +895,7 @@ static void msp34xxg_set_source(struct i2c_client *client, u16 reg, int in)
 static void msp34xxg_set_sources(struct i2c_client *client)
 {
 	struct msp_state *state = to_state(i2c_get_clientdata(client));
-	u32 in = state->routing.input;
+	u32 in = state->route_in;
 
 	msp34xxg_set_source(client, 0x0008, (in >> 4) & 0xf);
 	/* quasi-peak detector is set to same input as the loudspeaker (MAIN) */
@@ -912,7 +911,7 @@ static void msp34xxg_set_sources(struct i2c_client *client)
 static void msp34xxg_reset(struct i2c_client *client)
 {
 	struct msp_state *state = to_state(i2c_get_clientdata(client));
-	int tuner = (state->routing.input >> 3) & 1;
+	int tuner = (state->route_in >> 3) & 1;
 	int modus;
 
 	/* initialize std to 1 (autodetect) to signal that no standard is

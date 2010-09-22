@@ -26,35 +26,31 @@
  *   Port from Qemu.
  */
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/bitops.h>
 #include "irq.h"
 
 #include <linux/kvm_host.h>
+#include "trace.h"
 
 static void pic_lock(struct kvm_pic *s)
+	__acquires(&s->lock)
 {
-	spin_lock(&s->lock);
+	raw_spin_lock(&s->lock);
 }
 
 static void pic_unlock(struct kvm_pic *s)
+	__releases(&s->lock)
 {
-	struct kvm *kvm = s->kvm;
-	unsigned acks = s->pending_acks;
 	bool wakeup = s->wakeup_needed;
 	struct kvm_vcpu *vcpu;
 
-	s->pending_acks = 0;
 	s->wakeup_needed = false;
 
-	spin_unlock(&s->lock);
-
-	while (acks) {
-		kvm_notify_acked_irq(kvm, __ffs(acks));
-		acks &= acks - 1;
-	}
+	raw_spin_unlock(&s->lock);
 
 	if (wakeup) {
-		vcpu = s->kvm->vcpus[0];
+		vcpu = s->kvm->bsp_vcpu;
 		if (vcpu)
 			kvm_vcpu_kick(vcpu);
 	}
@@ -64,24 +60,39 @@ static void pic_clear_isr(struct kvm_kpic_state *s, int irq)
 {
 	s->isr &= ~(1 << irq);
 	s->isr_ack |= (1 << irq);
+	if (s != &s->pics_state->pics[0])
+		irq += 8;
+	/*
+	 * We are dropping lock while calling ack notifiers since ack
+	 * notifier callbacks for assigned devices call into PIC recursively.
+	 * Other interrupt may be delivered to PIC while lock is dropped but
+	 * it should be safe since PIC state is already updated at this stage.
+	 */
+	pic_unlock(s->pics_state);
+	kvm_notify_acked_irq(s->pics_state->kvm, SELECT_PIC(irq), irq);
+	pic_lock(s->pics_state);
 }
 
 void kvm_pic_clear_isr_ack(struct kvm *kvm)
 {
 	struct kvm_pic *s = pic_irqchip(kvm);
+
+	pic_lock(s);
 	s->pics[0].isr_ack = 0xff;
 	s->pics[1].isr_ack = 0xff;
+	pic_unlock(s);
 }
 
 /*
  * set irq level. If an edge is detected, then the IRR is set to 1
  */
-static inline void pic_set_irq1(struct kvm_kpic_state *s, int irq, int level)
+static inline int pic_set_irq1(struct kvm_kpic_state *s, int irq, int level)
 {
-	int mask;
+	int mask, ret = 1;
 	mask = 1 << irq;
 	if (s->elcr & mask)	/* level triggered */
 		if (level) {
+			ret = !(s->irr & mask);
 			s->irr |= mask;
 			s->last_irr |= mask;
 		} else {
@@ -90,11 +101,15 @@ static inline void pic_set_irq1(struct kvm_kpic_state *s, int irq, int level)
 		}
 	else	/* edge triggered */
 		if (level) {
-			if ((s->last_irr & mask) == 0)
+			if ((s->last_irr & mask) == 0) {
+				ret = !(s->irr & mask);
 				s->irr |= mask;
+			}
 			s->last_irr |= mask;
 		} else
 			s->last_irr &= ~mask;
+
+	return (s->imr & mask) ? -1 : ret;
 }
 
 /*
@@ -171,16 +186,21 @@ void kvm_pic_update_irq(struct kvm_pic *s)
 	pic_unlock(s);
 }
 
-void kvm_pic_set_irq(void *opaque, int irq, int level)
+int kvm_pic_set_irq(void *opaque, int irq, int level)
 {
 	struct kvm_pic *s = opaque;
+	int ret = -1;
 
 	pic_lock(s);
 	if (irq >= 0 && irq < PIC_NUM_PINS) {
-		pic_set_irq1(&s->pics[irq >> 3], irq & 7, level);
+		ret = pic_set_irq1(&s->pics[irq >> 3], irq & 7, level);
 		pic_update_irq(s);
+		trace_kvm_pic_set_irq(irq >> 3, irq & 7, s->pics[irq >> 3].elcr,
+				      s->pics[irq >> 3].imr, ret == 0);
 	}
 	pic_unlock(s);
+
+	return ret;
 }
 
 /*
@@ -189,16 +209,18 @@ void kvm_pic_set_irq(void *opaque, int irq, int level)
 static inline void pic_intack(struct kvm_kpic_state *s, int irq)
 {
 	s->isr |= 1 << irq;
-	if (s->auto_eoi) {
-		if (s->rotate_on_auto_eoi)
-			s->priority_add = (irq + 1) & 7;
-		pic_clear_isr(s, irq);
-	}
 	/*
 	 * We don't clear a level sensitive interrupt here
 	 */
 	if (!(s->elcr & (1 << irq)))
 		s->irr &= ~(1 << irq);
+
+	if (s->auto_eoi) {
+		if (s->rotate_on_auto_eoi)
+			s->priority_add = (irq + 1) & 7;
+		pic_clear_isr(s, irq);
+	}
+
 }
 
 int kvm_pic_read_irq(struct kvm *kvm)
@@ -232,29 +254,17 @@ int kvm_pic_read_irq(struct kvm *kvm)
 	}
 	pic_update_irq(s);
 	pic_unlock(s);
-	kvm_notify_acked_irq(kvm, irq);
 
 	return intno;
 }
 
 void kvm_pic_reset(struct kvm_kpic_state *s)
 {
-	int irq, irqbase, n;
+	int irq;
 	struct kvm *kvm = s->pics_state->irq_request_opaque;
-	struct kvm_vcpu *vcpu0 = kvm->vcpus[0];
+	struct kvm_vcpu *vcpu0 = kvm->bsp_vcpu;
+	u8 irr = s->irr, isr = s->imr;
 
-	if (s == &s->pics_state->pics[0])
-		irqbase = 0;
-	else
-		irqbase = 8;
-
-	for (irq = 0; irq < PIC_NUM_PINS/2; irq++) {
-		if (vcpu0 && kvm_apic_accept_pic_intr(vcpu0))
-			if (s->irr & (1 << irq) || s->isr & (1 << irq)) {
-				n = irq + irqbase;
-				s->pics_state->pending_acks |= 1 << n;
-			}
-	}
 	s->last_irr = 0;
 	s->irr = 0;
 	s->imr = 0;
@@ -270,6 +280,13 @@ void kvm_pic_reset(struct kvm_kpic_state *s)
 	s->rotate_on_auto_eoi = 0;
 	s->special_fully_nested_mode = 0;
 	s->init4 = 0;
+
+	for (irq = 0; irq < PIC_NUM_PINS/2; irq++) {
+		if (vcpu0 && kvm_apic_accept_pic_intr(vcpu0))
+			if (irr & (1 << irq) || isr & (1 << irq)) {
+				pic_clear_isr(s, irq);
+			}
+	}
 }
 
 static void pic_ioport_write(void *opaque, u32 addr, u32 val)
@@ -312,9 +329,9 @@ static void pic_ioport_write(void *opaque, u32 addr, u32 val)
 				priority = get_priority(s, s->isr);
 				if (priority != 8) {
 					irq = (priority + s->priority_add) & 7;
-					pic_clear_isr(s, irq);
 					if (cmd == 5)
 						s->priority_add = (irq + 1) & 7;
+					pic_clear_isr(s, irq);
 					pic_update_irq(s->pics_state);
 				}
 				break;
@@ -417,8 +434,7 @@ static u32 elcr_ioport_read(void *opaque, u32 addr1)
 	return s->elcr;
 }
 
-static int picdev_in_range(struct kvm_io_device *this, gpa_t addr,
-			   int len, int is_write)
+static int picdev_in_range(gpa_t addr)
 {
 	switch (addr) {
 	case 0x20:
@@ -433,16 +449,23 @@ static int picdev_in_range(struct kvm_io_device *this, gpa_t addr,
 	}
 }
 
-static void picdev_write(struct kvm_io_device *this,
+static inline struct kvm_pic *to_pic(struct kvm_io_device *dev)
+{
+	return container_of(dev, struct kvm_pic, dev);
+}
+
+static int picdev_write(struct kvm_io_device *this,
 			 gpa_t addr, int len, const void *val)
 {
-	struct kvm_pic *s = this->private;
+	struct kvm_pic *s = to_pic(this);
 	unsigned char data = *(unsigned char *)val;
+	if (!picdev_in_range(addr))
+		return -EOPNOTSUPP;
 
 	if (len != 1) {
 		if (printk_ratelimit())
 			printk(KERN_ERR "PIC: non byte write\n");
-		return;
+		return 0;
 	}
 	pic_lock(s);
 	switch (addr) {
@@ -458,18 +481,21 @@ static void picdev_write(struct kvm_io_device *this,
 		break;
 	}
 	pic_unlock(s);
+	return 0;
 }
 
-static void picdev_read(struct kvm_io_device *this,
-			gpa_t addr, int len, void *val)
+static int picdev_read(struct kvm_io_device *this,
+		       gpa_t addr, int len, void *val)
 {
-	struct kvm_pic *s = this->private;
+	struct kvm_pic *s = to_pic(this);
 	unsigned char data = 0;
+	if (!picdev_in_range(addr))
+		return -EOPNOTSUPP;
 
 	if (len != 1) {
 		if (printk_ratelimit())
 			printk(KERN_ERR "PIC: non byte read\n");
-		return;
+		return 0;
 	}
 	pic_lock(s);
 	switch (addr) {
@@ -486,6 +512,7 @@ static void picdev_read(struct kvm_io_device *this,
 	}
 	*(unsigned char *)val = data;
 	pic_unlock(s);
+	return 0;
 }
 
 /*
@@ -494,7 +521,7 @@ static void picdev_read(struct kvm_io_device *this,
 static void pic_irq_request(void *opaque, int level)
 {
 	struct kvm *kvm = opaque;
-	struct kvm_vcpu *vcpu = kvm->vcpus[0];
+	struct kvm_vcpu *vcpu = kvm->bsp_vcpu;
 	struct kvm_pic *s = pic_irqchip(kvm);
 	int irq = pic_get_irq(&s->pics[0]);
 
@@ -505,13 +532,20 @@ static void pic_irq_request(void *opaque, int level)
 	}
 }
 
+static const struct kvm_io_device_ops picdev_ops = {
+	.read     = picdev_read,
+	.write    = picdev_write,
+};
+
 struct kvm_pic *kvm_create_pic(struct kvm *kvm)
 {
 	struct kvm_pic *s;
+	int ret;
+
 	s = kzalloc(sizeof(struct kvm_pic), GFP_KERNEL);
 	if (!s)
 		return NULL;
-	spin_lock_init(&s->lock);
+	raw_spin_lock_init(&s->lock);
 	s->kvm = kvm;
 	s->pics[0].elcr_mask = 0xf8;
 	s->pics[1].elcr_mask = 0xde;
@@ -523,10 +557,25 @@ struct kvm_pic *kvm_create_pic(struct kvm *kvm)
 	/*
 	 * Initialize PIO device
 	 */
-	s->dev.read = picdev_read;
-	s->dev.write = picdev_write;
-	s->dev.in_range = picdev_in_range;
-	s->dev.private = s;
-	kvm_io_bus_register_dev(&kvm->pio_bus, &s->dev);
+	kvm_iodevice_init(&s->dev, &picdev_ops);
+	mutex_lock(&kvm->slots_lock);
+	ret = kvm_io_bus_register_dev(kvm, KVM_PIO_BUS, &s->dev);
+	mutex_unlock(&kvm->slots_lock);
+	if (ret < 0) {
+		kfree(s);
+		return NULL;
+	}
+
 	return s;
+}
+
+void kvm_destroy_pic(struct kvm *kvm)
+{
+	struct kvm_pic *vpic = kvm->arch.vpic;
+
+	if (vpic) {
+		kvm_io_bus_unregister_dev(kvm, KVM_PIO_BUS, &vpic->dev);
+		kvm->arch.vpic = NULL;
+		kfree(vpic);
+	}
 }

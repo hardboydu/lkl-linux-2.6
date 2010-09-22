@@ -58,6 +58,7 @@
 #include <linux/irq.h>
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -1975,7 +1976,8 @@ static struct snd_pcm_hardware snd_dbri_pcm_hw = {
 	.info		= SNDRV_PCM_INFO_MMAP |
 			  SNDRV_PCM_INFO_INTERLEAVED |
 			  SNDRV_PCM_INFO_BLOCK_TRANSFER |
-			  SNDRV_PCM_INFO_MMAP_VALID,
+			  SNDRV_PCM_INFO_MMAP_VALID |
+			  SNDRV_PCM_INFO_BATCH,
 	.formats	= SNDRV_PCM_FMTBIT_MU_LAW |
 			  SNDRV_PCM_FMTBIT_A_LAW |
 			  SNDRV_PCM_FMTBIT_U8 |
@@ -2612,10 +2614,10 @@ static int __devinit dbri_probe(struct of_device *op, const struct of_device_id 
 		return -ENODEV;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_dbri));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_dbri), &card);
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, "DBRI");
 	strcpy(card->shortname, "Sun DBRI");
@@ -2649,7 +2651,7 @@ static int __devinit dbri_probe(struct of_device *op, const struct of_device_id 
 
 	printk(KERN_INFO "audio%d at %p (irq %d) is DBRI(%c)+CS4215(%d)\n",
 	       dev, dbri->regs,
-	       dbri->irq, op->node->name[9], dbri->mm.version);
+	       dbri->irq, op->dev.of_node->name[9], dbri->mm.version);
 	dev++;
 
 	return 0;
@@ -2685,8 +2687,11 @@ static const struct of_device_id dbri_match[] = {
 MODULE_DEVICE_TABLE(of, dbri_match);
 
 static struct of_platform_driver dbri_sbus_driver = {
-	.name		= "dbri",
-	.match_table	= dbri_match,
+	.driver = {
+		.name = "dbri",
+		.owner = THIS_MODULE,
+		.of_match_table = dbri_match,
+	},
 	.probe		= dbri_probe,
 	.remove		= __devexit_p(dbri_remove),
 };

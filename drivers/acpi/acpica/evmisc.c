@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2010, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -163,10 +163,10 @@ acpi_ev_queue_notify_request(struct acpi_namespace_node * node,
 	 * 2) Global device notify handler
 	 * 3) Per-device notify handler
 	 */
-	if ((acpi_gbl_system_notify.handler
-	     && (notify_value <= ACPI_MAX_SYS_NOTIFY))
-	    || (acpi_gbl_device_notify.handler
-		&& (notify_value > ACPI_MAX_SYS_NOTIFY)) || handler_obj) {
+	if ((acpi_gbl_system_notify.handler &&
+	     (notify_value <= ACPI_MAX_SYS_NOTIFY)) ||
+	    (acpi_gbl_device_notify.handler &&
+	     (notify_value > ACPI_MAX_SYS_NOTIFY)) || handler_obj) {
 		notify_info = acpi_ut_create_generic_state();
 		if (!notify_info) {
 			return (AE_NO_MEMORY);
@@ -174,7 +174,8 @@ acpi_ev_queue_notify_request(struct acpi_namespace_node * node,
 
 		if (!handler_obj) {
 			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-					  "Executing system notify handler for Notify (%4.4s, %X) node %p\n",
+					  "Executing system notify handler for Notify (%4.4s, %X) "
+					  "node %p\n",
 					  acpi_ut_get_node_name(node),
 					  notify_value, node));
 		}
@@ -258,9 +259,15 @@ static void ACPI_SYSTEM_XFACE acpi_ev_notify_dispatch(void *context)
 
 	handler_obj = notify_info->notify.handler_obj;
 	if (handler_obj) {
-		handler_obj->notify.handler(notify_info->notify.node,
-					    notify_info->notify.value,
-					    handler_obj->notify.context);
+		struct acpi_object_notify_handler *notifier;
+
+		notifier = &handler_obj->notify;
+		while (notifier) {
+			notifier->handler(notify_info->notify.node,
+					  notify_info->notify.value,
+					  notifier->context);
+			notifier = notifier->next;
+		}
 	}
 
 	/* All done with the info object */
@@ -534,8 +541,9 @@ acpi_status acpi_ev_release_global_lock(void)
 		 */
 		if (pending) {
 			status =
-			    acpi_set_register(ACPI_BITREG_GLOBAL_LOCK_RELEASE,
-					      1);
+			    acpi_write_bit_register
+			    (ACPI_BITREG_GLOBAL_LOCK_RELEASE,
+			     ACPI_ENABLE_EVENT);
 		}
 
 		ACPI_DEBUG_PRINT((ACPI_DB_EXEC,
@@ -582,7 +590,7 @@ void acpi_ev_terminate(void)
 			status = acpi_disable_event(i, 0);
 			if (ACPI_FAILURE(status)) {
 				ACPI_ERROR((AE_INFO,
-					    "Could not disable fixed event %d",
+					    "Could not disable fixed event %u",
 					    (u32) i));
 			}
 		}

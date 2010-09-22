@@ -10,7 +10,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -703,7 +702,7 @@ static int snd_cs4231_timer_stop(struct snd_timer *timer)
 	return 0;
 }
 
-static void __init snd_cs4231_init(struct snd_cs4231 *chip)
+static void __devinit snd_cs4231_init(struct snd_cs4231 *chip)
 {
 	unsigned long flags;
 
@@ -1020,7 +1019,7 @@ static snd_pcm_uframes_t snd_cs4231_capture_pointer(
 	return bytes_to_frames(substream->runtime, ptr);
 }
 
-static int __init snd_cs4231_probe(struct snd_cs4231 *chip)
+static int __devinit snd_cs4231_probe(struct snd_cs4231 *chip)
 {
 	unsigned long flags;
 	int i;
@@ -1219,7 +1218,7 @@ static struct snd_pcm_ops snd_cs4231_capture_ops = {
 	.pointer	=	snd_cs4231_capture_pointer,
 };
 
-static int __init snd_cs4231_pcm(struct snd_card *card)
+static int __devinit snd_cs4231_pcm(struct snd_card *card)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	struct snd_pcm *pcm;
@@ -1248,7 +1247,7 @@ static int __init snd_cs4231_pcm(struct snd_card *card)
 	return 0;
 }
 
-static int __init snd_cs4231_timer(struct snd_card *card)
+static int __devinit snd_cs4231_timer(struct snd_card *card)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	struct snd_timer *timer;
@@ -1499,7 +1498,7 @@ static int snd_cs4231_put_double(struct snd_kcontrol *kcontrol,
   .private_value = (left_reg) | ((right_reg) << 8) | ((shift_left) << 16) | \
 		   ((shift_right) << 19) | ((mask) << 24) | ((invert) << 22) }
 
-static struct snd_kcontrol_new snd_cs4231_controls[] __initdata = {
+static struct snd_kcontrol_new snd_cs4231_controls[] __devinitdata = {
 CS4231_DOUBLE("PCM Playback Switch", 0, CS4231_LEFT_OUTPUT,
 		CS4231_RIGHT_OUTPUT, 7, 7, 1, 1),
 CS4231_DOUBLE("PCM Playback Volume", 0, CS4231_LEFT_OUTPUT,
@@ -1538,7 +1537,7 @@ CS4231_SINGLE("Line Out Switch", 0, CS4231_PIN_CTRL, 6, 1, 1),
 CS4231_SINGLE("Headphone Out Switch", 0, CS4231_PIN_CTRL, 7, 1, 1)
 };
 
-static int __init snd_cs4231_mixer(struct snd_card *card)
+static int __devinit snd_cs4231_mixer(struct snd_card *card)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	int err, idx;
@@ -1559,10 +1558,11 @@ static int __init snd_cs4231_mixer(struct snd_card *card)
 
 static int dev;
 
-static int __init cs4231_attach_begin(struct snd_card **rcard)
+static int __devinit cs4231_attach_begin(struct snd_card **rcard)
 {
 	struct snd_card *card;
 	struct snd_cs4231 *chip;
+	int err;
 
 	*rcard = NULL;
 
@@ -1574,10 +1574,10 @@ static int __init cs4231_attach_begin(struct snd_card **rcard)
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_cs4231));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_cs4231), &card);
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, "CS4231");
 	strcpy(card->shortname, "Sun CS4231");
@@ -1589,7 +1589,7 @@ static int __init cs4231_attach_begin(struct snd_card **rcard)
 	return 0;
 }
 
-static int __init cs4231_attach_finish(struct snd_card *card)
+static int __devinit cs4231_attach_finish(struct snd_card *card)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	int err;
@@ -1793,9 +1793,9 @@ static struct snd_device_ops snd_cs4231_sbus_dev_ops = {
 	.dev_free	=	snd_cs4231_sbus_dev_free,
 };
 
-static int __init snd_cs4231_sbus_create(struct snd_card *card,
-					 struct of_device *op,
-					 int dev)
+static int __devinit snd_cs4231_sbus_create(struct snd_card *card,
+					    struct of_device *op,
+					    int dev)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	int err;
@@ -1959,9 +1959,9 @@ static struct snd_device_ops snd_cs4231_ebus_dev_ops = {
 	.dev_free	=	snd_cs4231_ebus_dev_free,
 };
 
-static int __init snd_cs4231_ebus_create(struct snd_card *card,
-					 struct of_device *op,
-					 int dev)
+static int __devinit snd_cs4231_ebus_create(struct snd_card *card,
+					    struct of_device *op,
+					    int dev)
 {
 	struct snd_cs4231 *chip = card->private_data;
 	int err;
@@ -2075,12 +2075,12 @@ static int __devinit cs4231_ebus_probe(struct of_device *op, const struct of_dev
 static int __devinit cs4231_probe(struct of_device *op, const struct of_device_id *match)
 {
 #ifdef EBUS_SUPPORT
-	if (!strcmp(op->node->parent->name, "ebus"))
+	if (!strcmp(op->dev.of_node->parent->name, "ebus"))
 		return cs4231_ebus_probe(op, match);
 #endif
 #ifdef SBUS_SUPPORT
-	if (!strcmp(op->node->parent->name, "sbus") ||
-	    !strcmp(op->node->parent->name, "sbi"))
+	if (!strcmp(op->dev.of_node->parent->name, "sbus") ||
+	    !strcmp(op->dev.of_node->parent->name, "sbi"))
 		return cs4231_sbus_probe(op, match);
 #endif
 	return -ENODEV;
@@ -2109,8 +2109,11 @@ static const struct of_device_id cs4231_match[] = {
 MODULE_DEVICE_TABLE(of, cs4231_match);
 
 static struct of_platform_driver cs4231_driver = {
-	.name		= "audio",
-	.match_table	= cs4231_match,
+	.driver = {
+		.name = "audio",
+		.owner = THIS_MODULE,
+		.of_match_table = cs4231_match,
+	},
 	.probe		= cs4231_probe,
 	.remove		= __devexit_p(cs4231_remove),
 };

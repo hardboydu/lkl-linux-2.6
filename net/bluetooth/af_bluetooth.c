@@ -31,7 +31,6 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/poll.h>
@@ -41,16 +40,15 @@
 
 #include <net/bluetooth/bluetooth.h>
 
-#define VERSION "2.14"
+#define VERSION "2.15"
 
 /* Bluetooth sockets */
 #define BT_MAX_PROTO	8
-static struct net_proto_family *bt_proto[BT_MAX_PROTO];
+static const struct net_proto_family *bt_proto[BT_MAX_PROTO];
 static DEFINE_RWLOCK(bt_proto_lock);
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
 static struct lock_class_key bt_lock_key[BT_MAX_PROTO];
-static const char *bt_key_strings[BT_MAX_PROTO] = {
+static const char *const bt_key_strings[BT_MAX_PROTO] = {
 	"sk_lock-AF_BLUETOOTH-BTPROTO_L2CAP",
 	"sk_lock-AF_BLUETOOTH-BTPROTO_HCI",
 	"sk_lock-AF_BLUETOOTH-BTPROTO_SCO",
@@ -62,7 +60,7 @@ static const char *bt_key_strings[BT_MAX_PROTO] = {
 };
 
 static struct lock_class_key bt_slock_key[BT_MAX_PROTO];
-static const char *bt_slock_key_strings[BT_MAX_PROTO] = {
+static const char *const bt_slock_key_strings[BT_MAX_PROTO] = {
 	"slock-AF_BLUETOOTH-BTPROTO_L2CAP",
 	"slock-AF_BLUETOOTH-BTPROTO_HCI",
 	"slock-AF_BLUETOOTH-BTPROTO_SCO",
@@ -86,13 +84,8 @@ static inline void bt_sock_reclassify_lock(struct socket *sock, int proto)
 			bt_slock_key_strings[proto], &bt_slock_key[proto],
 				bt_key_strings[proto], &bt_lock_key[proto]);
 }
-#else
-static inline void bt_sock_reclassify_lock(struct socket *sock, int proto)
-{
-}
-#endif
 
-int bt_sock_register(int proto, struct net_proto_family *ops)
+int bt_sock_register(int proto, const struct net_proto_family *ops)
 {
 	int err = 0;
 
@@ -132,7 +125,8 @@ int bt_sock_unregister(int proto)
 }
 EXPORT_SYMBOL(bt_sock_unregister);
 
-static int bt_sock_create(struct net *net, struct socket *sock, int proto)
+static int bt_sock_create(struct net *net, struct socket *sock, int proto,
+			  int kern)
 {
 	int err;
 
@@ -150,7 +144,7 @@ static int bt_sock_create(struct net *net, struct socket *sock, int proto)
 	read_lock(&bt_proto_lock);
 
 	if (bt_proto[proto] && try_module_get(bt_proto[proto]->owner)) {
-		err = bt_proto[proto]->create(net, sock, proto);
+		err = bt_proto[proto]->create(net, sock, proto, kern);
 		bt_sock_reclassify_lock(sock, proto);
 		module_put(bt_proto[proto]->owner);
 	}
@@ -217,7 +211,8 @@ struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock)
 			continue;
 		}
 
-		if (sk->sk_state == BT_CONNECTED || !newsock) {
+		if (sk->sk_state == BT_CONNECTED || !newsock ||
+						bt_sk(parent)->defer_setup) {
 			bt_accept_unlink(sk);
 			if (newsock)
 				sock_graft(sk, newsock);
@@ -232,7 +227,7 @@ struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock)
 EXPORT_SYMBOL(bt_accept_dequeue);
 
 int bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
-	struct msghdr *msg, size_t len, int flags)
+				struct msghdr *msg, size_t len, int flags)
 {
 	int noblock = flags & MSG_DONTWAIT;
 	struct sock *sk = sock->sk;
@@ -262,7 +257,7 @@ int bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 	skb_reset_transport_header(skb);
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (err == 0)
-		sock_recv_timestamp(msg, sk, skb);
+		sock_recv_ts_and_drops(msg, sk, skb);
 
 	skb_free_datagram(sk, skb);
 
@@ -277,7 +272,9 @@ static inline unsigned int bt_accept_poll(struct sock *parent)
 
 	list_for_each_safe(p, n, &bt_sk(parent)->accept_q) {
 		sk = (struct sock *) list_entry(p, struct bt_sock, accept_q);
-		if (sk->sk_state == BT_CONNECTED)
+		if (sk->sk_state == BT_CONNECTED ||
+					(bt_sk(parent)->defer_setup &&
+						sk->sk_state == BT_CONNECT2))
 			return POLLIN | POLLRDNORM;
 	}
 
@@ -291,7 +288,7 @@ unsigned int bt_sock_poll(struct file * file, struct socket *sock, poll_table *w
 
 	BT_DBG("sock %p, sk %p", sock, sk);
 
-	poll_wait(file, sk->sk_sleep, wait);
+	poll_wait(file, sk_sleep(sk), wait);
 
 	if (sk->sk_state == BT_LISTEN)
 		return bt_accept_poll(sk);
@@ -340,7 +337,7 @@ int bt_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (sk->sk_state == BT_LISTEN)
 			return -EINVAL;
 
-		amount = sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc);
+		amount = sk->sk_sndbuf - sk_wmem_alloc_get(sk);
 		if (amount < 0)
 			amount = 0;
 		err = put_user(amount, (int __user *) arg);
@@ -381,7 +378,7 @@ int bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
 
 	BT_DBG("sk %p", sk);
 
-	add_wait_queue(sk->sk_sleep, &wait);
+	add_wait_queue(sk_sleep(sk), &wait);
 	while (sk->sk_state != state) {
 		set_current_state(TASK_INTERRUPTIBLE);
 
@@ -404,7 +401,7 @@ int bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
 			break;
 	}
 	set_current_state(TASK_RUNNING);
-	remove_wait_queue(sk->sk_sleep, &wait);
+	remove_wait_queue(sk_sleep(sk), &wait);
 	return err;
 }
 EXPORT_SYMBOL(bt_sock_wait_state);

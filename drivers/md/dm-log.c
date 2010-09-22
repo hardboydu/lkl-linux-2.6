@@ -16,40 +16,29 @@
 
 #define DM_MSG_PREFIX "dirty region log"
 
-struct dm_dirty_log_internal {
-	struct dm_dirty_log_type *type;
-
-	struct list_head list;
-	long use;
-};
-
 static LIST_HEAD(_log_types);
 static DEFINE_SPINLOCK(_lock);
 
-static struct dm_dirty_log_internal *__find_dirty_log_type(const char *name)
+static struct dm_dirty_log_type *__find_dirty_log_type(const char *name)
 {
-	struct dm_dirty_log_internal *log_type;
+	struct dm_dirty_log_type *log_type;
 
 	list_for_each_entry(log_type, &_log_types, list)
-		if (!strcmp(name, log_type->type->name))
+		if (!strcmp(name, log_type->name))
 			return log_type;
 
 	return NULL;
 }
 
-static struct dm_dirty_log_internal *_get_dirty_log_type(const char *name)
+static struct dm_dirty_log_type *_get_dirty_log_type(const char *name)
 {
-	struct dm_dirty_log_internal *log_type;
+	struct dm_dirty_log_type *log_type;
 
 	spin_lock(&_lock);
 
 	log_type = __find_dirty_log_type(name);
-	if (log_type) {
-		if (!log_type->use && !try_module_get(log_type->type->module))
-			log_type = NULL;
-		else
-			log_type->use++;
-	}
+	if (log_type && !try_module_get(log_type->module))
+		log_type = NULL;
 
 	spin_unlock(&_lock);
 
@@ -76,14 +65,14 @@ static struct dm_dirty_log_internal *_get_dirty_log_type(const char *name)
 static struct dm_dirty_log_type *get_type(const char *type_name)
 {
 	char *p, *type_name_dup;
-	struct dm_dirty_log_internal *log_type;
+	struct dm_dirty_log_type *log_type;
 
 	if (!type_name)
 		return NULL;
 
 	log_type = _get_dirty_log_type(type_name);
 	if (log_type)
-		return log_type->type;
+		return log_type;
 
 	type_name_dup = kstrdup(type_name, GFP_KERNEL);
 	if (!type_name_dup) {
@@ -105,56 +94,33 @@ static struct dm_dirty_log_type *get_type(const char *type_name)
 
 	kfree(type_name_dup);
 
-	return log_type ? log_type->type : NULL;
+	return log_type;
 }
 
 static void put_type(struct dm_dirty_log_type *type)
 {
-	struct dm_dirty_log_internal *log_type;
-
 	if (!type)
 		return;
 
 	spin_lock(&_lock);
-	log_type = __find_dirty_log_type(type->name);
-	if (!log_type)
+	if (!__find_dirty_log_type(type->name))
 		goto out;
 
-	if (!--log_type->use)
-		module_put(type->module);
-
-	BUG_ON(log_type->use < 0);
+	module_put(type->module);
 
 out:
 	spin_unlock(&_lock);
 }
 
-static struct dm_dirty_log_internal *_alloc_dirty_log_type(struct dm_dirty_log_type *type)
-{
-	struct dm_dirty_log_internal *log_type = kzalloc(sizeof(*log_type),
-							 GFP_KERNEL);
-
-	if (log_type)
-		log_type->type = type;
-
-	return log_type;
-}
-
 int dm_dirty_log_type_register(struct dm_dirty_log_type *type)
 {
-	struct dm_dirty_log_internal *log_type = _alloc_dirty_log_type(type);
 	int r = 0;
-
-	if (!log_type)
-		return -ENOMEM;
 
 	spin_lock(&_lock);
 	if (!__find_dirty_log_type(type->name))
-		list_add(&log_type->list, &_log_types);
-	else {
-		kfree(log_type);
+		list_add(&type->list, &_log_types);
+	else
 		r = -EEXIST;
-	}
 	spin_unlock(&_lock);
 
 	return r;
@@ -163,33 +129,25 @@ EXPORT_SYMBOL(dm_dirty_log_type_register);
 
 int dm_dirty_log_type_unregister(struct dm_dirty_log_type *type)
 {
-	struct dm_dirty_log_internal *log_type;
-
 	spin_lock(&_lock);
 
-	log_type = __find_dirty_log_type(type->name);
-	if (!log_type) {
+	if (!__find_dirty_log_type(type->name)) {
 		spin_unlock(&_lock);
 		return -EINVAL;
 	}
 
-	if (log_type->use) {
-		spin_unlock(&_lock);
-		return -ETXTBSY;
-	}
-
-	list_del(&log_type->list);
+	list_del(&type->list);
 
 	spin_unlock(&_lock);
-	kfree(log_type);
 
 	return 0;
 }
 EXPORT_SYMBOL(dm_dirty_log_type_unregister);
 
 struct dm_dirty_log *dm_dirty_log_create(const char *type_name,
-					 struct dm_target *ti,
-					 unsigned int argc, char **argv)
+			struct dm_target *ti,
+			int (*flush_callback_fn)(struct dm_target *ti),
+			unsigned int argc, char **argv)
 {
 	struct dm_dirty_log_type *type;
 	struct dm_dirty_log *log;
@@ -204,6 +162,7 @@ struct dm_dirty_log *dm_dirty_log_create(const char *type_name,
 		return NULL;
 	}
 
+	log->flush_callback_fn = flush_callback_fn;
 	log->type = type;
 	if (type->ctr(log, ti, argc, argv)) {
 		kfree(log);
@@ -251,7 +210,9 @@ struct log_header {
 
 struct log_c {
 	struct dm_target *ti;
-	int touched;
+	int touched_dirtied;
+	int touched_cleaned;
+	int flush_failed;
 	uint32_t region_size;
 	unsigned int region_count;
 	region_t sync_count;
@@ -276,6 +237,7 @@ struct log_c {
 	 * Disk log fields
 	 */
 	int log_dev_failed;
+	int log_dev_flush_failed;
 	struct dm_dev *log_dev;
 	struct log_header header;
 
@@ -296,14 +258,14 @@ static inline void log_set_bit(struct log_c *l,
 			       uint32_t *bs, unsigned bit)
 {
 	ext2_set_bit(bit, (unsigned long *) bs);
-	l->touched = 1;
+	l->touched_cleaned = 1;
 }
 
 static inline void log_clear_bit(struct log_c *l,
 				 uint32_t *bs, unsigned bit)
 {
 	ext2_clear_bit(bit, (unsigned long *) bs);
-	l->touched = 1;
+	l->touched_dirtied = 1;
 }
 
 /*----------------------------------------------------------------
@@ -328,6 +290,19 @@ static int rw_header(struct log_c *lc, int rw)
 	lc->io_req.bi_rw = rw;
 
 	return dm_io(&lc->io_req, 1, &lc->header_location, NULL);
+}
+
+static int flush_header(struct log_c *lc)
+{
+	struct dm_io_region null_location = {
+		.bdev = lc->header_location.bdev,
+		.sector = 0,
+		.count = 0,
+	};
+
+	lc->io_req.bi_rw = WRITE_BARRIER;
+
+	return dm_io(&lc->io_req, 1, &null_location, NULL);
 }
 
 static int read_header(struct log_c *log)
@@ -421,7 +396,9 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 	}
 
 	lc->ti = ti;
-	lc->touched = 0;
+	lc->touched_dirtied = 0;
+	lc->touched_cleaned = 0;
+	lc->flush_failed = 0;
 	lc->region_size = region_size;
 	lc->region_count = region_count;
 	lc->sync = sync;
@@ -449,16 +426,19 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 	} else {
 		lc->log_dev = dev;
 		lc->log_dev_failed = 0;
+		lc->log_dev_flush_failed = 0;
 		lc->header_location.bdev = lc->log_dev->bdev;
 		lc->header_location.sector = 0;
 
 		/*
 		 * Buffer holds both header and bitset.
 		 */
-		buf_size = dm_round_up((LOG_OFFSET << SECTOR_SHIFT) +
-				       bitset_size, ti->limits.hardsect_size);
+		buf_size =
+		    dm_round_up((LOG_OFFSET << SECTOR_SHIFT) + bitset_size,
+				bdev_logical_block_size(lc->header_location.
+							    bdev));
 
-		if (buf_size > dev->bdev->bd_inode->i_size) {
+		if (buf_size > i_size_read(dev->bdev->bd_inode)) {
 			DMWARN("log device %s too small: need %llu bytes",
 				dev->name, (unsigned long long)buf_size);
 			kfree(lc);
@@ -563,8 +543,7 @@ static int disk_ctr(struct dm_dirty_log *log, struct dm_target *ti,
 		return -EINVAL;
 	}
 
-	r = dm_get_device(ti, argv[0], 0, 0 /* FIXME */,
-			  FMODE_READ | FMODE_WRITE, &dev);
+	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &dev);
 	if (r)
 		return r;
 
@@ -655,6 +634,11 @@ static int disk_resume(struct dm_dirty_log *log)
 
 	/* write the new header */
 	r = rw_header(lc, WRITE);
+	if (!r) {
+		r = flush_header(lc);
+		if (r)
+			lc->log_dev_flush_failed = 1;
+	}
 	if (r) {
 		DMWARN("%s: Failed to write header on dirty region log device",
 		       lc->log_dev->name);
@@ -697,18 +681,40 @@ static int core_flush(struct dm_dirty_log *log)
 
 static int disk_flush(struct dm_dirty_log *log)
 {
-	int r;
-	struct log_c *lc = (struct log_c *) log->context;
+	int r, i;
+	struct log_c *lc = log->context;
 
 	/* only write if the log has changed */
-	if (!lc->touched)
+	if (!lc->touched_cleaned && !lc->touched_dirtied)
 		return 0;
+
+	if (lc->touched_cleaned && log->flush_callback_fn &&
+	    log->flush_callback_fn(lc->ti)) {
+		/*
+		 * At this point it is impossible to determine which
+		 * regions are clean and which are dirty (without
+		 * re-reading the log off disk). So mark all of them
+		 * dirty.
+		 */
+		lc->flush_failed = 1;
+		for (i = 0; i < lc->region_count; i++)
+			log_clear_bit(lc, lc->clean_bits, i);
+	}
 
 	r = rw_header(lc, WRITE);
 	if (r)
 		fail_log_device(lc);
-	else
-		lc->touched = 0;
+	else {
+		if (lc->touched_dirtied) {
+			r = flush_header(lc);
+			if (r) {
+				lc->log_dev_flush_failed = 1;
+				fail_log_device(lc);
+			} else
+				lc->touched_dirtied = 0;
+		}
+		lc->touched_cleaned = 0;
+	}
 
 	return r;
 }
@@ -722,7 +728,8 @@ static void core_mark_region(struct dm_dirty_log *log, region_t region)
 static void core_clear_region(struct dm_dirty_log *log, region_t region)
 {
 	struct log_c *lc = (struct log_c *) log->context;
-	log_set_bit(lc, lc->clean_bits, region);
+	if (likely(!lc->flush_failed))
+		log_set_bit(lc, lc->clean_bits, region);
 }
 
 static int core_get_resync_work(struct dm_dirty_log *log, region_t *region)
@@ -803,7 +810,9 @@ static int disk_status(struct dm_dirty_log *log, status_type_t status,
 	switch(status) {
 	case STATUSTYPE_INFO:
 		DMEMIT("3 %s %s %c", log->type->name, lc->log_dev->name,
-		       lc->log_dev_failed ? 'D' : 'A');
+		       lc->log_dev_flush_failed ? 'F' :
+		       lc->log_dev_failed ? 'D' :
+		       'A');
 		break;
 
 	case STATUSTYPE_TABLE:

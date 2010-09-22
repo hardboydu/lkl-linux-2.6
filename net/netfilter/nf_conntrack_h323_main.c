@@ -17,6 +17,7 @@
 #include <linux/inet.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/slab.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <linux/skbuff.h>
@@ -29,6 +30,7 @@
 #include <net/netfilter/nf_conntrack_expect.h>
 #include <net/netfilter/nf_conntrack_ecache.h>
 #include <net/netfilter/nf_conntrack_helper.h>
+#include <net/netfilter/nf_conntrack_zones.h>
 #include <linux/netfilter/nf_conntrack_h323.h>
 
 /* Parameters */
@@ -192,8 +194,7 @@ static int get_tpkt_data(struct sk_buff *skb, unsigned int protoff,
 			return 0;
 		}
 
-		if (net_ratelimit())
-			printk("nf_ct_h323: incomplete TPKT (fragmented?)\n");
+		pr_debug("nf_ct_h323: incomplete TPKT (fragmented?)\n");
 		goto clear_out;
 	}
 
@@ -606,7 +607,7 @@ static int h245_help(struct sk_buff *skb, unsigned int protoff,
       drop:
 	spin_unlock_bh(&nf_h323_lock);
 	if (net_ratelimit())
-		printk("nf_ct_h245: packet dropped\n");
+		pr_info("nf_ct_h245: packet dropped\n");
 	return NF_DROP;
 }
 
@@ -1151,7 +1152,7 @@ static int q931_help(struct sk_buff *skb, unsigned int protoff,
       drop:
 	spin_unlock_bh(&nf_h323_lock);
 	if (net_ratelimit())
-		printk("nf_ct_q931: packet dropped\n");
+		pr_info("nf_ct_q931: packet dropped\n");
 	return NF_DROP;
 }
 
@@ -1167,7 +1168,7 @@ static struct nf_conntrack_helper nf_conntrack_helper_q931[] __read_mostly = {
 		.name			= "Q.931",
 		.me			= THIS_MODULE,
 		.tuple.src.l3num	= AF_INET,
-		.tuple.src.u.tcp.port	= __constant_htons(Q931_PORT),
+		.tuple.src.u.tcp.port	= cpu_to_be16(Q931_PORT),
 		.tuple.dst.protonum	= IPPROTO_TCP,
 		.help			= q931_help,
 		.expect_policy		= &q931_exp_policy,
@@ -1176,7 +1177,7 @@ static struct nf_conntrack_helper nf_conntrack_helper_q931[] __read_mostly = {
 		.name			= "Q.931",
 		.me			= THIS_MODULE,
 		.tuple.src.l3num	= AF_INET6,
-		.tuple.src.u.tcp.port	= __constant_htons(Q931_PORT),
+		.tuple.src.u.tcp.port	= cpu_to_be16(Q931_PORT),
 		.tuple.dst.protonum	= IPPROTO_TCP,
 		.help			= q931_help,
 		.expect_policy		= &q931_exp_policy,
@@ -1216,7 +1217,7 @@ static struct nf_conntrack_expect *find_expect(struct nf_conn *ct,
 	tuple.dst.u.tcp.port = port;
 	tuple.dst.protonum = IPPROTO_TCP;
 
-	exp = __nf_ct_expect_find(net, &tuple);
+	exp = __nf_ct_expect_find(net, nf_ct_zone(ct), &tuple);
 	if (exp && exp->master == ct)
 		return exp;
 	return NULL;
@@ -1726,7 +1727,7 @@ static int ras_help(struct sk_buff *skb, unsigned int protoff,
       drop:
 	spin_unlock_bh(&nf_h323_lock);
 	if (net_ratelimit())
-		printk("nf_ct_ras: packet dropped\n");
+		pr_info("nf_ct_ras: packet dropped\n");
 	return NF_DROP;
 }
 
@@ -1741,7 +1742,7 @@ static struct nf_conntrack_helper nf_conntrack_helper_ras[] __read_mostly = {
 		.name			= "RAS",
 		.me			= THIS_MODULE,
 		.tuple.src.l3num	= AF_INET,
-		.tuple.src.u.udp.port	= __constant_htons(RAS_PORT),
+		.tuple.src.u.udp.port	= cpu_to_be16(RAS_PORT),
 		.tuple.dst.protonum	= IPPROTO_UDP,
 		.help			= ras_help,
 		.expect_policy		= &ras_exp_policy,
@@ -1750,7 +1751,7 @@ static struct nf_conntrack_helper nf_conntrack_helper_ras[] __read_mostly = {
 		.name			= "RAS",
 		.me			= THIS_MODULE,
 		.tuple.src.l3num	= AF_INET6,
-		.tuple.src.u.udp.port	= __constant_htons(RAS_PORT),
+		.tuple.src.u.udp.port	= cpu_to_be16(RAS_PORT),
 		.tuple.dst.protonum	= IPPROTO_UDP,
 		.help			= ras_help,
 		.expect_policy		= &ras_exp_policy,

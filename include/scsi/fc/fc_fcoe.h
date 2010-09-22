@@ -25,13 +25,6 @@
  */
 
 /*
- * The FCoE ethertype eventually goes in net/if_ether.h.
- */
-#ifndef ETH_P_FCOE
-#define	ETH_P_FCOE	0x8906		/* FCOE ether type */
-#endif
-
-/*
  * FC_FCOE_OUI hasn't been standardized yet.   XXX TBD.
  */
 #ifndef FC_FCOE_OUI
@@ -91,6 +84,18 @@ struct fcoe_crc_eof {
  * 14 bytes FCoE header + 24 byte FC header + 8 byte FCoE trailer = 46 bytes
  */
 #define FCOE_MIN_FRAME 46
+
+/*
+ * FCoE Link Error Status Block: T11 FC-BB-5 Rev2.0, Clause 7.10.
+ */
+struct fcoe_fc_els_lesb {
+	__be32		lesb_link_fail;	/* link failure count */
+	__be32		lesb_vlink_fail; /* virtual link failure count */
+	__be32		lesb_miss_fka;	/* missing FIP keep-alive count */
+	__be32		lesb_symb_err;	/* symbol error during carrier count */
+	__be32		lesb_err_block;	/* errored block count */
+	__be32		lesb_fcs_error; /* frame check sequence error count */
+};
 
 /*
  * fc_fcoe_set_mac - Store OUI + DID into MAC address field.

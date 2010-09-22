@@ -1,30 +1,7 @@
 /*
- * File:         arch/blackfin/kernel/bfin_gpio.h
- * Based on:
- * Author:	 Michael Hennerich (hennerich@blackfin.uclinux.org)
+ * Copyright 2006-2009 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Modified:
- *               Copyright 2004-2008 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 #ifndef __ARCH_BLACKFIN_GPIO_H__
@@ -93,6 +70,8 @@
 
 #ifndef __ASSEMBLY__
 
+#include <linux/compiler.h>
+
 /***********************************************************
 *
 * FUNCTIONS: Blackfin General Purpose Ports Access Functions
@@ -110,7 +89,7 @@
 * MODIFICATION HISTORY :
 **************************************************************/
 
-#ifndef BF548_FAMILY
+#ifndef CONFIG_BF54x
 void set_gpio_dir(unsigned, unsigned short);
 void set_gpio_inen(unsigned, unsigned short);
 void set_gpio_polar(unsigned, unsigned short);
@@ -182,24 +161,29 @@ struct gpio_port_t {
 };
 #endif
 
-#ifdef CONFIG_PM
+#ifdef BFIN_SPECIAL_GPIO_BANKS
+void bfin_special_gpio_free(unsigned gpio);
+int bfin_special_gpio_request(unsigned gpio, const char *label);
+#endif
 
-unsigned int bfin_pm_standby_setup(void);
-void bfin_pm_standby_restore(void);
+#ifdef CONFIG_PM
+int bfin_pm_standby_ctrl(unsigned ctrl);
+
+static inline int bfin_pm_standby_setup(void)
+{
+	return bfin_pm_standby_ctrl(1);
+}
+
+static inline void bfin_pm_standby_restore(void)
+{
+	bfin_pm_standby_ctrl(0);
+}
 
 void bfin_gpio_pm_hibernate_restore(void);
 void bfin_gpio_pm_hibernate_suspend(void);
 
 #ifndef CONFIG_BF54x
-#define PM_WAKE_RISING	0x1
-#define PM_WAKE_FALLING	0x2
-#define PM_WAKE_HIGH	0x4
-#define PM_WAKE_LOW	0x8
-#define PM_WAKE_BOTH_EDGES	(PM_WAKE_RISING | PM_WAKE_FALLING)
-#define PM_WAKE_IGNORE	0xF0
-
-int gpio_pm_wakeup_request(unsigned gpio, unsigned char type);
-void gpio_pm_wakeup_free(unsigned gpio);
+int gpio_pm_wakeup_ctrl(unsigned gpio, unsigned ctrl);
 
 struct gpio_port_s {
 	unsigned short data;
@@ -241,6 +225,9 @@ int bfin_gpio_direction_output(unsigned gpio, int value);
 int bfin_gpio_get_value(unsigned gpio);
 void bfin_gpio_set_value(unsigned gpio, int value);
 
+#include <asm/irq.h>
+#include <asm/errno.h>
+
 #ifdef CONFIG_GPIOLIB
 #include <asm-generic/gpio.h>		/* cansleep wrappers */
 
@@ -263,6 +250,11 @@ static inline void gpio_set_value(unsigned int gpio, int value)
 static inline int gpio_cansleep(unsigned int gpio)
 {
 	return __gpio_cansleep(gpio);
+}
+
+static inline int gpio_to_irq(unsigned gpio)
+{
+	return __gpio_to_irq(gpio);
 }
 
 #else /* !CONFIG_GPIOLIB */
@@ -297,14 +289,16 @@ static inline void gpio_set_value(unsigned gpio, int value)
 	return bfin_gpio_set_value(gpio, value);
 }
 
-#include <asm-generic/gpio.h>		/* cansleep wrappers */
-#endif	/* !CONFIG_GPIOLIB */
-#include <asm/irq.h>
-
 static inline int gpio_to_irq(unsigned gpio)
 {
-	return (gpio + GPIO_IRQ_BASE);
+	if (likely(gpio < MAX_BLACKFIN_GPIOS))
+		return gpio + GPIO_IRQ_BASE;
+
+	return -EINVAL;
 }
+
+#include <asm-generic/gpio.h>		/* cansleep wrappers */
+#endif	/* !CONFIG_GPIOLIB */
 
 static inline int irq_to_gpio(unsigned irq)
 {

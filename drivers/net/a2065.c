@@ -46,7 +46,6 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/crc32.h>
@@ -526,7 +525,7 @@ static inline int lance_reset (struct net_device *dev)
 	load_csrs (lp);
 
 	lance_init_ring (dev);
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	netif_start_queue(dev);
 
 	status = init_restart_lance (lp);
@@ -547,53 +546,37 @@ static void lance_tx_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t lance_start_xmit (struct sk_buff *skb,
+				     struct net_device *dev)
 {
 	struct lance_private *lp = netdev_priv(dev);
 	volatile struct lance_regs *ll = lp->ll;
 	volatile struct lance_init_block *ib = lp->init_block;
-	int entry, skblen, len;
-	int status = 0;
+	int entry, skblen;
+	int status = NETDEV_TX_OK;
 	unsigned long flags;
 
-	skblen = skb->len;
-	len = skblen;
-
-	if (len < ETH_ZLEN) {
-		len = ETH_ZLEN;
-		if (skb_padto(skb, ETH_ZLEN))
-			return 0;
-	}
+	if (skb_padto(skb, ETH_ZLEN))
+		return NETDEV_TX_OK;
+	skblen = max_t(unsigned, skb->len, ETH_ZLEN);
 
 	local_irq_save(flags);
 
 	if (!TX_BUFFS_AVAIL){
 		local_irq_restore(flags);
-		return -1;
+		return NETDEV_TX_LOCKED;
 	}
 
 #ifdef DEBUG_DRIVER
 	/* dump the packet */
-	{
-		int i;
-
-		for (i = 0; i < 64; i++) {
-			if ((i % 16) == 0)
-				printk("\n" KERN_DEBUG);
-			printk ("%2.2x ", skb->data [i]);
-		}
-		printk("\n");
-	}
+	print_hex_dump(KERN_DEBUG, "skb->data: ", DUMP_PREFIX_NONE,
+		       16, 1, skb->data, 64, true);
 #endif
 	entry = lp->tx_new & lp->tx_ring_mod_mask;
-	ib->btx_ring [entry].length = (-len) | 0xf000;
+	ib->btx_ring [entry].length = (-skblen) | 0xf000;
 	ib->btx_ring [entry].misc = 0;
 
 	skb_copy_from_linear_data(skb, (void *)&ib->tx_buf [entry][0], skblen);
-
-	/* Clear the slack of the packet, do I need this? */
-	if (len != skblen)
-		memset ((void *) &ib->tx_buf [entry][skblen], 0, len - skblen);
 
 	/* Now, give the packet to the lance */
 	ib->btx_ring [entry].tmd1_bits = (LE_T1_POK|LE_T1_OWN);
@@ -605,7 +588,6 @@ static int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
 
 	/* Kick the lance: transmit now */
 	ll->rdp = LE_C0_INEA | LE_C0_TDMD;
-	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
 
 	local_irq_restore(flags);
@@ -619,9 +601,8 @@ static void lance_load_multicast (struct net_device *dev)
 	struct lance_private *lp = netdev_priv(dev);
 	volatile struct lance_init_block *ib = lp->init_block;
 	volatile u16 *mcast_table = (u16 *)&ib->filter;
-	struct dev_mc_list *dmi=dev->mc_list;
+	struct netdev_hw_addr *ha;
 	char *addrs;
-	int i;
 	u32 crc;
 
 	/* set all multicast bits */
@@ -635,9 +616,8 @@ static void lance_load_multicast (struct net_device *dev)
 	ib->filter [1] = 0;
 
 	/* Add addresses */
-	for (i = 0; i < dev->mc_count; i++){
-		addrs = dmi->dmi_addr;
-		dmi   = dmi->next;
+	netdev_for_each_mc_addr(ha, dev) {
+		addrs = ha->addr;
 
 		/* multicast address? */
 		if (!(*addrs & 1))
@@ -647,7 +627,6 @@ static void lance_load_multicast (struct net_device *dev)
 		crc = crc >> 26;
 		mcast_table [crc >> 4] |= 1 << (crc & 0xf);
 	}
-	return;
 }
 
 static void lance_set_multicast (struct net_device *dev)
@@ -693,12 +672,24 @@ static struct zorro_device_id a2065_zorro_tbl[] __devinitdata = {
 	{ ZORRO_PROD_AMERISTAR_A2065 },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(zorro, a2065_zorro_tbl);
 
 static struct zorro_driver a2065_driver = {
 	.name		= "a2065",
 	.id_table	= a2065_zorro_tbl,
 	.probe		= a2065_init_one,
 	.remove		= __devexit_p(a2065_remove_one),
+};
+
+static const struct net_device_ops lance_netdev_ops = {
+	.ndo_open		= lance_open,
+	.ndo_stop		= lance_close,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_tx_timeout		= lance_tx_timeout,
+	.ndo_set_multicast_list	= lance_set_multicast,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
 };
 
 static int __devinit a2065_init_one(struct zorro_dev *z,
@@ -762,12 +753,8 @@ static int __devinit a2065_init_one(struct zorro_dev *z,
 	priv->rx_ring_mod_mask = RX_RING_MOD_MASK;
 	priv->tx_ring_mod_mask = TX_RING_MOD_MASK;
 
-	dev->open = &lance_open;
-	dev->stop = &lance_close;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->tx_timeout = &lance_tx_timeout;
+	dev->netdev_ops = &lance_netdev_ops;
 	dev->watchdog_timeo = 5*HZ;
-	dev->set_multicast_list = &lance_set_multicast;
 	dev->dma = 0;
 
 	init_timer(&priv->multicast_timer);
