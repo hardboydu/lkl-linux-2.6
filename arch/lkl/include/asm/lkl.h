@@ -104,6 +104,7 @@ __kernel_ssize_t lkl_sys_pwrite64(unsigned int fd, const char *buf,
 				  __kernel_size_t count, __kernel_loff_t pos);
 __kernel_ssize_t lkl_sys_pread64(unsigned int fd, char *buf,
 				 __kernel_size_t count, __kernel_loff_t pos);
+long lkl_sys_getpid(void);
 
 
 int sprintf(char * buf, const char * fmt,

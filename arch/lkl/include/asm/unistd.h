@@ -45,7 +45,9 @@
 #define __NR_lkl_pread64 38
 #define __NR_pwrite64 39
 #define __NR_lkl_pwrite64 39
-#define NR_syscalls 40
+#define __NR_getpid 40
+#define NR_syscalls 41
+
 
 /* TODO */
 #define __NR_restart_syscall 0
@@ -56,7 +58,6 @@
 #define __NR_execve 0
 #define __NR_time 0
 #define __NR_lchown 0
-#define __NR_getpid 0
 #define __NR_mount 0
 #define __NR_setuid 0
 #define __NR_ptrace 0

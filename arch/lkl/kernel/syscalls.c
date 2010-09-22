@@ -326,6 +326,7 @@ void init_syscall_table(void)
 	INIT_STE(truncate);
 	INIT_STE(lkl_pwrite64);
 	INIT_STE(lkl_pwrite64);
+	INIT_STE(getpid);
 }
 
 long lkl_sys_sync(void)
@@ -534,6 +535,11 @@ ssize_t lkl_sys_pwrite64(unsigned int fd, const char *buf, size_t count, loff_t 
 ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t pos)
 {
 	return SYSCALL(lkl_pwrite64, fd, (long)buf, count, (pos >> 32),(pos & 0xffffffff));
+}
+
+long lkl_sys_getpid(void)
+{
+	return SYSCALL(getpid);
 }
 
 /* 
