@@ -125,7 +125,7 @@ static void cleanup_netdev(struct net_device *netdev)
 
 int _lkl_del_eth(int ifindex)
 {
-	struct net_device *netdev=dev_get_by_index(ifindex);
+	struct net_device *netdev=dev_get_by_index(&init_net, ifindex);
 
 	if (!netdev)
 		return -1;
@@ -161,6 +161,11 @@ static int stop(struct net_device *netdev)
 	return 0;
 }
 
+const static struct net_device_ops lkl_eth_ops = {
+	.ndo_open = open,
+	.ndo_stop = stop,
+	.ndo_start_xmit = start_xmit
+};
 
 int _lkl_add_eth(const char *native_dev, const char *mac, int rx_ring_len)
 {
@@ -196,10 +201,6 @@ int _lkl_add_eth(const char *native_dev, const char *mac, int rx_ring_len)
 	}
 
 	memcpy(netdev->dev_addr, mac, 6);
-
-	netdev->hard_start_xmit=start_xmit;
-	netdev->open=open;
-	netdev->stop=stop;
 
 	nd->native_dev=kstrdup(native_dev, GFP_KERNEL);
 
