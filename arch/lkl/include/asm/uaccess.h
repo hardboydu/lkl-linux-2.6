@@ -45,9 +45,12 @@ static inline int strncpy_from_user(char *dst, const char __user *src, int count
         return count>strlen(src)?strlen(src):count;
 }
 
+/*
+ * strlen_user returns the length of all characters + the trailing NUL
+ */
 static inline int strnlen_user(const void __user *str, long len)
 {
-        return strnlen(str, len);
+        return strnlen(str, len) + 1;
 }
 
 static inline int clear_user(void __user *mem, int len)
