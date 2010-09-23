@@ -558,7 +558,7 @@ LKLAPI ssize_t lkl_sys_pread64(unsigned int fd, char *buf, size_t count, loff_t 
 	return SYSCALL(lkl_pread64, fd, (long)buf, count, (pos >> 32), (pos & 0xffffffff));
 }
 
-long lkl_sys_getpid(void)
+LKLAPI long lkl_sys_getpid(void)
 {
 	return SYSCALL(getpid);
 }
