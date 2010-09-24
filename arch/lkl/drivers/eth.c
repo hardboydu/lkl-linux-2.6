@@ -203,6 +203,7 @@ int _lkl_add_eth(const char *native_dev, const char *mac, int rx_ring_len)
 	memcpy(netdev->dev_addr, mac, 6);
 
 	nd->native_dev=kstrdup(native_dev, GFP_KERNEL);
+	netdev->netdev_ops = &lkl_eth_ops;
 
 	if (register_netdev(netdev)) 
 		goto error;
