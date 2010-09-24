@@ -6,7 +6,6 @@
 #include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/tick.h>
-#include <linux/spinlock.h>
 
 #include <asm/callbacks.h>
 
@@ -51,19 +50,18 @@ struct irq_data {
 static struct irq_info {
         struct list_head data_list;
         int no_data_count;
-	spinlock_t lock;
+	void *lock;
 } irqs [NR_IRQS];
 
 static void *sem;
 
 void lkl_trigger_irq(int irq)
 {
-	unsigned long flags;
 	BUG_ON(irq >= NR_IRQS);
 
-	spin_lock_irqsave(&irqs[irq].lock, flags);
+	lkl_nops->sem_down(irqs[irq].lock);
         irqs[irq].no_data_count++;
-	spin_unlock_irqrestore(&irqs[irq].lock, flags);
+	lkl_nops->sem_up(irqs[irq].lock);
 
 	lkl_nops->sem_up(sem);
 }
@@ -71,17 +69,16 @@ void lkl_trigger_irq(int irq)
 int lkl_trigger_irq_with_data(int irq, void *data)
 {
 	struct irq_data *id;
-	unsigned long flags;
 
 	BUG_ON(irq >= NR_IRQS);
 
 	if (!(id=lkl_nops->mem_alloc(sizeof(*id))))
 		return -ENOMEM;
 
-	spin_lock_irqsave(&irqs[irq].lock, flags);
+	lkl_nops->sem_down(irqs[irq].lock);
 	id->regs.irq_data=data;
 	list_add_tail(&id->list, &irqs[irq].data_list);
-	spin_unlock_irqrestore(&irqs[irq].lock, flags);
+	lkl_nops->sem_up(irqs[irq].lock);
 
 	lkl_nops->sem_up(sem);
 
@@ -92,18 +89,17 @@ int lkl_trigger_irq_with_data(int irq, void *data)
 void lkl_purge_irq_queue(int irq)
 {
 	struct list_head *i, *aux;
-	unsigned long flags;
 
 	BUG_ON(irq >= NR_IRQS);
 
-	spin_lock_irqsave(&irqs[irq].lock, flags);
+	lkl_nops->sem_down(irqs[irq].lock);
         irqs[irq].no_data_count=0;
 	list_for_each_safe(i, aux, &irqs[irq].data_list) {
 		struct irq_data *id=list_entry(i, struct irq_data, list);
 		list_del(&id->list);
 		lkl_nops->mem_free(id);
 	}
-	spin_unlock_irqrestore(&irqs[irq].lock, flags);
+	lkl_nops->sem_up(irqs[irq].lock);
 }
 
 
@@ -111,15 +107,14 @@ static int dequeue_data(int irq, struct pt_regs *regs)
 {
 	struct list_head *i;
 	struct irq_data *id=NULL;
-	unsigned long flags;
 
-	spin_lock_irqsave(&irqs[irq].lock, flags);
+	lkl_nops->sem_down(irqs[irq].lock);
 	list_for_each(i, &irqs[irq].data_list) {
 		id=list_entry(i, struct irq_data, list);
 		list_del(&id->list);
 		break;
 	}
-	spin_unlock_irqrestore(&irqs[irq].lock, flags);
+	lkl_nops->sem_up(irqs[irq].lock);
 
 	if (!id)
 		return -ENOENT;
@@ -133,13 +128,13 @@ static int dequeue_data(int irq, struct pt_regs *regs)
 static int dequeue_nodata(int irq, struct pt_regs *regs)
 {
 	int count;
-	unsigned long flags;
 
-	spin_lock_irqsave(&irqs[irq].lock, flags);
-	count = irqs[irq].no_data_count;
+
+	lkl_nops->sem_down(irqs[irq].lock);
+	count=irqs[irq].no_data_count;
 	if (count > 0)
 		irqs[irq].no_data_count--;
-	spin_unlock_irqrestore(&irqs[irq].lock, flags);
+	lkl_nops->sem_up(irqs[irq].lock);
 
         if (count <= 0)
                 return -ENOENT;
@@ -229,8 +224,8 @@ void init_IRQ(void)
 
 	
 	for(i=0; i<NR_IRQS; i++) {
+		BUG_ON((irqs[i].lock=lkl_nops->sem_alloc(1)) == NULL);
 		INIT_LIST_HEAD(&irqs[i].data_list);
-		spin_lock_init(&irqs[i].lock);
 		irqs[i].no_data_count=0;
 		set_irq_chip_and_handler(i, &dummy_irq_chip, handle_simple_irq);
 	}
@@ -240,7 +235,12 @@ void init_IRQ(void)
 
 void free_IRQ(void)
 {
+	int i;
+
+	for(i=0; i<NR_IRQS; i++)
+		lkl_nops->sem_free(irqs[i].lock);
 	lkl_nops->sem_free(sem);
+
 	printk(KERN_INFO "lkl: IRQs freed\n");
 }
 
