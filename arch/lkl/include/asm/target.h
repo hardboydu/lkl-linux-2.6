@@ -17,9 +17,7 @@
 
 #ifdef __i386__
 
-#ifndef LITTLE_ENDIAN
-#define LITTLE_ENDIAN
-#endif
+#define LKL_LITTLE_ENDIAN
 
 #if defined(__ELF__)
 #define TARGET_FORMAT "elf32-i386"
@@ -33,10 +31,8 @@
 
 #ifdef __powerpc__
 
-#ifndef BIG_ENDIAN
 #ifdef __BIG_ENDIAN__
-#define BIG_ENDIAN
-#endif
+#define LKL_BIG_ENDIAN
 #endif
 
 #if BITS_PER_LONG == 32
@@ -49,7 +45,7 @@
 #endif /* __GNUC__ */
 
 #ifdef _MSC_VER
-#define LITTLE_ENDIAN
+#define LKL_LITTLE_ENDIAN
 #define TARGET_FORMAT "pe-i386"
 #define TARGET_ARCH   "i386"
 #define BITS_PER_LONG 32
@@ -60,7 +56,7 @@
 #endif /* _MSC_VER */
 
 
-#if ! defined(BIG_ENDIAN) && ! defined(LITTLE_ENDIAN)
+#if ! defined(LKL_BIG_ENDIAN) && ! defined(LKL_LITTLE_ENDIAN)
 #error "unknown endianess"
 #endif
 

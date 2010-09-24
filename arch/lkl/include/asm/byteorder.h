@@ -3,9 +3,9 @@
 
 #include "target.h"
 
-#if defined(LITTLE_ENDIAN)
+#if defined(LKL_LITTLE_ENDIAN)
 #  include <linux/byteorder/little_endian.h>
-#elif  defined(BIG_ENDIAN)
+#elif  defined(LKL_BIG_ENDIAN)
 #  include <linux/byteorder/big_endian.h>
 #else
 #  error unknown endianess
