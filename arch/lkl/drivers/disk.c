@@ -48,7 +48,7 @@ static void lkl_disk_request(struct request_queue *q)
 		if (rq == NULL)
 			break;
 
-		if (! blk_fs_request(rq)) {
+		if (!blk_fs_request(rq)) {
 			printk (KERN_NOTICE "lkl_disk_request: Skip non-fs request\n");
 			__blk_end_request_cur(rq, -EIO);
 			continue;
@@ -56,14 +56,12 @@ static void lkl_disk_request(struct request_queue *q)
 
 		dev = rq->rq_disk->private_data;
 
-		cs.linux_cookie = rq;
-		lkl_disk_do_rw(dev->data, blk_rq_pos(rq), blk_rq_cur_sectors(rq),
-			       rq->buffer, rq_data_dir(rq), &cs);
-		/*
-		 * Async is broken.
-		 */
-		BUG_ON (cs.sync == 0);
-		__blk_end_request_cur(rq, cs.error ? -EIO : 0);
+		do {
+			cs.linux_cookie = rq;
+			lkl_disk_do_rw(dev->data, blk_rq_pos(rq), blk_rq_cur_sectors(rq),
+				       rq->buffer, rq_data_dir(rq), &cs);
+			BUG_ON (cs.sync == 0); /* Async is broken.*/
+		} while (__blk_end_request_cur(rq, cs.error ? -EIO : 0));
 	}
 }
 
