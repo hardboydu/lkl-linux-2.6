@@ -45,8 +45,9 @@ static void* rx_thread(void *handle)
 		if (!led) {
 			led=lkl_eth_get_rx_desc(h->netdev);
 			if (!led) {
-				lkl_printf("lkl eth: failed to get descriptor\n");
-				/* drop the packet */
+				/* Drop the packet. FIXME: It would be nice
+				 * to have a counter for this, maybe part of the
+				 * Linux interface stats?  */
 				recv(h->sock, NULL, 0, 0);
 				continue;
 			}
