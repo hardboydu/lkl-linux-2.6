@@ -563,6 +563,13 @@ LKLAPI long lkl_sys_getpid(void)
 	return SYSCALL(getpid);
 }
 
+LKLAPI long lkl_sys_bind(int sock, struct sockaddr *saddr, int len)
+{
+	long args[6]={sock, (long)saddr, len};
+	return SYSCALL(socketcall, SYS_BIND, (long)args);
+}
+
+
 /* 
  * Halt is special as we want to call syscall_done after the kernel has been
  * halted, in linux_start_kernel. 
